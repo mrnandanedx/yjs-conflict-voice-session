@@ -44,6 +44,30 @@ export const generateNewClientId = random.uint32
  */
 
 /**
+ * Describes who wrote what to a map key.
+ *
+ * @typedef {Object} MapWrite
+ * @property {'set'|'delete'} MapWrite.operation The attempted operation.
+ * @property {any} MapWrite.value The written value. `undefined` for a delete.
+ * @property {number} MapWrite.clientID The client that attempted the write.
+ * @property {any} MapWrite.origin The origin of the transaction.
+ * @property {number} MapWrite.time Unix time in milliseconds of the write.
+ */
+
+/**
+ * All refused writes to one key of one map, next to the writes that were kept instead.
+ *
+ * @typedef {Object} MapConflictSummary
+ * @property {YType<any>} MapConflictSummary.type The type that owns the key.
+ * @property {string|null} MapConflictSummary.mapName The name of the type if it is a top-level
+ * type. `null` if the type is nested.
+ * @property {string} MapConflictSummary.key The map key.
+ * @property {number} MapConflictSummary.refusedCount The number of refused writes.
+ * @property {Array<MapWrite & { status: 'kept'|'refused' }>} MapConflictSummary.writes Every kept
+ * and refused write, oldest first.
+ */
+
+/**
  * Describes a local map write that was refused by `doc.mapConflict`.
  *
  * @typedef {Object} MapConflict
@@ -56,6 +80,7 @@ export const generateNewClientId = random.uint32
  * @property {any} MapConflict.origin The origin of the transaction.
  * @property {number} MapConflict.clientID The client that attempted the write.
  * @property {number} MapConflict.time Unix time in milliseconds when the write was refused.
+ * @property {MapWrite} MapConflict.accepted The earlier write in this transaction that was kept.
  */
 
 /**
@@ -263,6 +288,44 @@ export class Doc extends ObservableV2 {
       t._integrate(this, null)
       return t
     })
+  }
+
+  /**
+   * Summarizes `doc.mapConflicts`, with one entry per map and key, in order of first conflict.
+   *
+   * @return {Array<MapConflictSummary>}
+   */
+  getMapConflictSummary () {
+    /**
+     * @type {Array<MapConflictSummary>}
+     */
+    const summary = []
+    /**
+     * @type {Map<YType<any>, Map<string, MapConflictSummary>>}
+     */
+    const groups = new Map()
+    /**
+     * @type {Set<MapWrite>}
+     */
+    const listedAccepted = new Set()
+    this.mapConflicts.forEach(({ type, key, operation, value, clientID, origin, time, accepted }) => {
+      const group = map.setIfUndefined(map.setIfUndefined(groups, type, () => /** @type {Map<string, MapConflictSummary>} */ (new Map())), key, () => {
+        const rootEntry = array.from(this.share.entries()).find(([, rootType]) => rootType === type)
+        /**
+         * @type {MapConflictSummary}
+         */
+        const created = { type, mapName: rootEntry ? rootEntry[0] : null, key, refusedCount: 0, writes: [] }
+        summary.push(created)
+        return created
+      })
+      if (!listedAccepted.has(accepted)) {
+        listedAccepted.add(accepted)
+        group.writes.push({ status: 'kept', ...accepted })
+      }
+      group.refusedCount++
+      group.writes.push({ status: 'refused', operation, value, clientID, origin, time })
+    })
+    return summary
   }
 
   /**

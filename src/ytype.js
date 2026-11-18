@@ -29,7 +29,6 @@ import * as traits from 'lib0/traits'
 import * as delta from 'lib0/delta'
 import * as array from 'lib0/array'
 import * as map from 'lib0/map'
-import * as set from 'lib0/set'
 import * as iterator from 'lib0/iterator'
 import * as error from 'lib0/error'
 import * as math from 'lib0/math'
@@ -1748,22 +1747,14 @@ const claimMapKeyWrite = (transaction, parent, key, operation, value) => {
   const doc = transaction.doc
   const strategy = doc.mapConflict
   if (strategy === 'overwrite') return true
-  const writtenKeys = map.setIfUndefined(transaction._mapKeysWritten, parent, () => /** @type {Set<string>} */ (set.create()))
-  if (!writtenKeys.has(key)) {
-    writtenKeys.add(key)
+  const firstWrites = map.setIfUndefined(transaction._mapKeysWritten, parent, () => /** @type {Map<string,any>} */ (new Map()))
+  const write = { operation, value, clientID: doc.clientID, origin: transaction.origin, time: time.getUnixTime() }
+  const accepted = firstWrites.get(key)
+  if (accepted === undefined) {
+    firstWrites.set(key, write)
     return true
   }
-  const conflict = {
-    key,
-    type: parent,
-    operation,
-    value,
-    currentValue: typeMapGet(parent, key),
-    strategy,
-    origin: transaction.origin,
-    clientID: doc.clientID,
-    time: time.getUnixTime()
-  }
+  const conflict = { ...write, key, type: parent, currentValue: typeMapGet(parent, key), strategy, accepted }
   doc.mapConflicts.push(conflict)
   if (strategy === 'error') {
     throw new MapConflictError(conflict)

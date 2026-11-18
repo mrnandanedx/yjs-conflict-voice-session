@@ -888,6 +888,15 @@ Each record has <code>key</code>, <code>type</code>, <code>operation</code>
 in memory on this doc instance. It isn't synced or persisted, and it grows until
 you clear it with <code>doc.mapConflicts.length = 0</code>.
   </dd>
+  <b><code>getMapConflictSummary():Array&lt;MapConflictSummary&gt;</code></b>
+  <dd>
+Summarizes <code>mapConflicts</code> with one entry per map and key. Each entry
+has <code>type</code>, <code>mapName</code> (<code>null</code> for nested types),
+<code>key</code>, <code>refusedCount</code>, and <code>writes</code>. Each item in
+<code>writes</code> says who wrote what: <code>status</code> (<code>kept</code> or
+<code>refused</code>), <code>clientID</code>, <code>origin</code>,
+<code>operation</code>, <code>value</code>, and <code>time</code>.
+  </dd>
   <b><code>clientID</code></b>
   <dd>A unique id that identifies this client. (readonly)</dd>
   <b><code>gc</code></b>

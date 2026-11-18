@@ -539,3 +539,55 @@ export const testMapConflictsIgnoreAcceptedWrites = _tc => {
   })
   t.assert(strict.mapConflicts.length === 0)
 }
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictSummary = _tc => {
+  const ydoc = new Y.Doc({ mapConflict: 'keep-first' })
+  t.compare(ydoc.getMapConflictSummary(), [])
+  const settings = ydoc.get('settings')
+  const nested = new Y.Type()
+  settings.setAttr('nested', nested)
+  ydoc.clientID = 1
+  ydoc.transact(() => {
+    settings.setAttr('a', 1)
+    settings.setAttr('a', 2)
+    settings.deleteAttr('a')
+    settings.setAttr('b', 1)
+    settings.setAttr('b', 2)
+    nested.setAttr('a', 1)
+    nested.setAttr('a', 2)
+    settings.setAttr('untouched', 1)
+  }, 'alice')
+  ydoc.clientID = 2
+  ydoc.transact(() => {
+    settings.deleteAttr('a')
+    settings.setAttr('a', 3)
+  }, 'bob')
+  const summary = ydoc.getMapConflictSummary()
+  /**
+   * @param {import('../src/utils/Doc.js').MapConflictSummary} group
+   */
+  const describe = group => group.writes.map(w => [w.status, w.clientID, w.origin, w.operation, w.value])
+  t.assert(summary.length === 3)
+  const [a, b, nestedA] = summary
+  t.assert(a.type === settings && a.mapName === 'settings' && a.key === 'a')
+  t.assert(a.refusedCount === 3)
+  t.compare(describe(a), [
+    ['kept', 1, 'alice', 'set', 1],
+    ['refused', 1, 'alice', 'set', 2],
+    ['refused', 1, 'alice', 'delete', undefined],
+    ['kept', 2, 'bob', 'delete', undefined],
+    ['refused', 2, 'bob', 'set', 3]
+  ])
+  t.assert(b.key === 'b' && b.refusedCount === 1)
+  t.compare(describe(b), [
+    ['kept', 1, 'alice', 'set', 1],
+    ['refused', 1, 'alice', 'set', 2]
+  ])
+  t.assert(nestedA.type === nested && nestedA.mapName === null && nestedA.key === 'a')
+  // the summary is derived from the log
+  ydoc.mapConflicts.length = 0
+  t.compare(ydoc.getMapConflictSummary(), [])
+}
