@@ -44,6 +44,38 @@ export const generateNewClientId = random.uint32
  */
 
 /**
+ * Describes a local map write that was refused by `doc.mapConflict`.
+ *
+ * @typedef {Object} MapConflict
+ * @property {string} MapConflict.key The map key that was written more than once.
+ * @property {YType<any>} MapConflict.type The type that owns the key.
+ * @property {'set'|'delete'} MapConflict.operation The refused operation.
+ * @property {any} MapConflict.value The refused value. `undefined` if a delete was refused.
+ * @property {any} MapConflict.currentValue The value of the key when the write was refused.
+ * @property {'keep-first'|'error'} MapConflict.strategy The strategy that refused the write.
+ * @property {any} MapConflict.origin The origin of the transaction.
+ * @property {number} MapConflict.clientID The client that attempted the write.
+ * @property {number} MapConflict.time Unix time in milliseconds when the write was refused.
+ */
+
+/**
+ * Thrown when `doc.mapConflict` is `error` and a transaction writes to a map key more than once.
+ */
+export class MapConflictError extends Error {
+  /**
+   * @param {MapConflict} conflict
+   */
+  constructor (conflict) {
+    super(`Refused ${conflict.operation} on map key "${conflict.key}": the key was already written in this transaction`)
+    this.name = 'MapConflictError'
+    /**
+     * @type {MapConflict}
+     */
+    this.conflict = conflict
+  }
+}
+
+/**
  * @typedef {Object} DocEvents
  * @property {function(Doc):void} DocEvents.destroy
  * @property {function(Doc):void} DocEvents.load
@@ -76,6 +108,13 @@ export class Doc extends ObservableV2 {
      * @type {MapConflictStrategy}
      */
     this.mapConflict = mapConflict
+    /**
+     * Every local map write refused by `mapConflict`, oldest first. This log is kept in memory on
+     * this doc instance. It is not synced or persisted.
+     *
+     * @type {Array<MapConflict>}
+     */
+    this.mapConflicts = []
     this.gc = gc
     this.gcFilter = gcFilter
     this.clientID = generateNewClientId()

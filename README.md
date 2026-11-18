@@ -871,10 +871,22 @@ Controls what happens when a transaction writes to the same map key more than
 once. Setting and deleting a key both count as writes. With
 <code>overwrite</code> (the default), the last write wins. With
 <code>keep-first</code>, the first write wins and later writes to that key are
-ignored. With <code>error</code>, later writes to that key throw an error. Writes
-that ran before the error stay applied, because transactions don't roll back.
-The strategy only applies to local writes on this doc. Remote updates are always
-merged as usual, so peers with different strategies still converge.
+ignored. With <code>error</code>, later writes to that key throw a
+<code>Y.MapConflictError</code>. Writes that ran before the error stay applied,
+because transactions don't roll back. The strategy only applies to local writes
+on this doc. Remote updates are always merged as usual, so peers with different
+strategies still converge.
+  </dd>
+  <b><code>mapConflicts:Array&lt;MapConflict&gt;</code></b>
+  <dd>
+The writes refused by <code>keep-first</code> or <code>error</code>, oldest first.
+Each record has <code>key</code>, <code>type</code>, <code>operation</code>
+(<code>set</code> or <code>delete</code>), <code>value</code>,
+<code>currentValue</code>, <code>strategy</code>, <code>origin</code>,
+<code>clientID</code>, and <code>time</code>. The same record is available as
+<code>error.conflict</code> on a <code>Y.MapConflictError</code>. The log is kept
+in memory on this doc instance. It isn't synced or persisted, and it grows until
+you clear it with <code>doc.mapConflicts.length = 0</code>.
   </dd>
   <b><code>clientID</code></b>
   <dd>A unique id that identifies this client. (readonly)</dd>

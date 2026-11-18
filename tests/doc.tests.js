@@ -458,3 +458,84 @@ export const testMapConflictRejectsUnknownStrategy = _tc => {
     new Y.Doc({ mapConflict: /** @type {any} */ ('unknown') }) // eslint-disable-line no-new
   })
 }
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictErrorCarriesContext = _tc => {
+  const ydoc = new Y.Doc({ mapConflict: 'error' })
+  const ymap = ydoc.get()
+  const origin = { name: 'test-origin' }
+  /**
+   * @type {any}
+   */
+  let caught = null
+  try {
+    ydoc.transact(() => {
+      ymap.setAttr('a', 1)
+      ymap.setAttr('a', 2)
+    }, origin)
+  } catch (err) {
+    caught = err
+  }
+  t.assert(caught instanceof Y.MapConflictError)
+  t.assert(caught instanceof Error)
+  t.assert(caught.name === 'MapConflictError')
+  t.assert(caught.message.includes('"a"'))
+  const conflict = caught.conflict
+  t.assert(conflict.key === 'a')
+  t.assert(conflict.type === ymap)
+  t.assert(conflict.operation === 'set')
+  t.assert(conflict.value === 2)
+  t.assert(conflict.currentValue === 1)
+  t.assert(conflict.strategy === 'error')
+  t.assert(conflict.origin === origin)
+  t.assert(conflict.clientID === ydoc.clientID)
+  t.assert(typeof conflict.time === 'number')
+  t.assert(ydoc.mapConflicts.length === 1)
+  t.assert(ydoc.mapConflicts[0] === conflict)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictsAreRecorded = _tc => {
+  const ydoc = new Y.Doc({ mapConflict: 'keep-first' })
+  const ymap = ydoc.get()
+  ydoc.transact(() => {
+    ymap.setAttr('a', 1)
+    ymap.setAttr('a', 2)
+    ymap.deleteAttr('a')
+    ymap.setAttr('b', 1) // first write to this key is not a conflict
+  })
+  t.assert(ydoc.mapConflicts.length === 2)
+  const [first, second] = ydoc.mapConflicts
+  t.assert(first.operation === 'set' && first.value === 2 && first.currentValue === 1)
+  t.assert(first.strategy === 'keep-first')
+  t.assert(second.operation === 'delete' && second.value === undefined && second.currentValue === 1)
+  // records survive later transactions
+  ymap.setAttr('a', 3)
+  t.assert(ydoc.mapConflicts.length === 2)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictsIgnoreAcceptedWrites = _tc => {
+  const overwrite = new Y.Doc()
+  overwrite.transact(() => {
+    overwrite.get().setAttr('a', 1)
+    overwrite.get().setAttr('a', 2)
+  })
+  t.assert(overwrite.mapConflicts.length === 0)
+  const strict = new Y.Doc({ mapConflict: 'error' })
+  Y.applyUpdate(strict, Y.encodeStateAsUpdate(overwrite))
+  t.assert(strict.mapConflicts.length === 0)
+  strict.transact(() => {
+    t.fails(() => {
+      strict.get().setAttr('b', /** @type {any} */ (new Map()))
+    })
+    strict.get().setAttr('b', 1)
+  })
+  t.assert(strict.mapConflicts.length === 0)
+}

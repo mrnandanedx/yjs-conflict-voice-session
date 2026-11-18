@@ -19,6 +19,7 @@ import {
   getItemCleanStart,
   noAttributionsManager,
   transact,
+  MapConflictError,
   ContentDoc, UpdateEncoderV1, UpdateEncoderV2, Doc, Snapshot, Transaction, EventHandler, YEvent, Item, createAttributionFromAttributionItems, AbstractAttributionManager // eslint-disable-line
 } from './internals.js'
 
@@ -32,6 +33,7 @@ import * as set from 'lib0/set'
 import * as iterator from 'lib0/iterator'
 import * as error from 'lib0/error'
 import * as math from 'lib0/math'
+import * as time from 'lib0/time'
 import * as log from 'lib0/logging'
 import * as object from 'lib0/object'
 import * as s from 'lib0/schema'
@@ -1729,26 +1731,42 @@ export const typeListDelete = (transaction, parent, index, length) => {
 }
 
 /**
- * Applies `doc.mapConflict` to a local write and remembers the written key.
+ * Applies `doc.mapConflict` to a local write and remembers the written key. Refused writes are
+ * logged on `doc.mapConflicts`.
  *
  * @param {Transaction} transaction
  * @param {YType} parent
  * @param {string} key
+ * @param {'set'|'delete'} operation
+ * @param {YValue} [value]
  * @return {boolean} Whether the write should be applied.
  *
  * @private
  * @function
  */
-const claimMapKeyWrite = (transaction, parent, key) => {
-  const strategy = transaction.doc.mapConflict
+const claimMapKeyWrite = (transaction, parent, key, operation, value) => {
+  const doc = transaction.doc
+  const strategy = doc.mapConflict
   if (strategy === 'overwrite') return true
   const writtenKeys = map.setIfUndefined(transaction._mapKeysWritten, parent, () => /** @type {Set<string>} */ (set.create()))
   if (!writtenKeys.has(key)) {
     writtenKeys.add(key)
     return true
   }
+  const conflict = {
+    key,
+    type: parent,
+    operation,
+    value,
+    currentValue: typeMapGet(parent, key),
+    strategy,
+    origin: transaction.origin,
+    clientID: doc.clientID,
+    time: time.getUnixTime()
+  }
+  doc.mapConflicts.push(conflict)
   if (strategy === 'error') {
-    throw error.create(`Map key "${key}" was written more than once in the same transaction`)
+    throw new MapConflictError(conflict)
   }
   return false
 }
@@ -1765,7 +1783,7 @@ const claimMapKeyWrite = (transaction, parent, key) => {
  */
 export const typeMapDelete = (transaction, parent, key) => {
   const c = parent._map.get(key)
-  if (c !== undefined && !c.deleted && claimMapKeyWrite(transaction, parent, key)) {
+  if (c !== undefined && !c.deleted && claimMapKeyWrite(transaction, parent, key, 'delete')) {
     c.delete(transaction)
   }
 }
@@ -1811,7 +1829,7 @@ export const typeMapSet = (transaction, parent, key, value) => {
         }
     }
   }
-  if (!claimMapKeyWrite(transaction, parent, key)) return
+  if (!claimMapKeyWrite(transaction, parent, key, 'set', value)) return
   new Item(createID(ownClientId, getState(doc.store, ownClientId)), left, left && left.lastId, null, null, parent, key, content).integrate(transaction, 0)
 }
 
