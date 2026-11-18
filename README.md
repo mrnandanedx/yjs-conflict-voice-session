@@ -883,19 +883,31 @@ because a delete doesn't record which write it saw.
   </dd>
   <b><code>getMapConflicts():Array&lt;MapConflict&gt;</code></b>
   <dd>
-Lists the writes that lost a conflict, oldest first. The list is empty when the
-policy is <code>allow</code>. Each record has <code>source</code>
-(<code>local</code> or <code>remote</code>), <code>type</code>, <code>key</code>,
-<code>parent</code>, <code>parentName</code>, <code>operation</code>
-(<code>set</code> or <code>delete</code>), <code>value</code>,
-<code>currentValue</code>, <code>policy</code>, <code>origin</code>,
-<code>clientID</code>, <code>time</code>, and <code>accepted</code> (the write
-that was kept). <code>type</code> is <code>ambiguous</code> if the losing or the
-kept value is a shared type or a subdocument, because these values hold their own
-content and comparing the two writes doesn't tell you what was lost. Otherwise it
-is <code>value</code>. The same record is available as
-<code>error.conflict</code> on a <code>Y.MapConflictError</code>. Records are
-kept in memory on this doc instance and are not synced or persisted.
+Lists the recorded conflicts, oldest first. The list is empty when the policy is
+<code>allow</code>. Each record has these fields:
+<ul>
+<li><code>type</code>: <code>set-set</code>, or <code>delete-set</code> if one of
+the writes is a delete, in either order.</li>
+<li><code>key</code> and <code>parent</code>: the map key, and the name of the
+top-level map or <code>client:clock</code> of a nested map.</li>
+<li><code>source</code>: <code>local</code> for a repeated write in one
+transaction, <code>mixed</code> if this client wrote one of two concurrent writes,
+and <code>remote</code> if other clients wrote both.</li>
+<li><code>message</code>: a readable description of the conflict.</li>
+<li><code>writeA</code> and <code>writeB</code>: snapshots of the two writes with
+<code>clientID</code>, <code>operation</code>, <code>value</code>,
+<code>origin</code>, <code>time</code>, and a readable <code>summary</code>.</li>
+<li><code>resolution</code>: <code>winner</code> is <code>writeA</code> or
+<code>writeB</code>, and <code>strategy</code> is <code>deterministic</code>. The
+winner is always filled in. If an incoming update was refused, it names the write
+that wins when peers merge that update.</li>
+<li><code>ambiguous</code>: <code>true</code> if a value is a shared type or a
+subdocument, because these values hold their own content and comparing the two
+writes doesn't tell you what was lost.</li>
+</ul>
+The same record is available as <code>error.conflict</code> on a
+<code>Y.MapConflictError</code>. Records are kept in memory on this doc instance
+and are not synced or persisted.
   </dd>
   <b><code>getMapConflictSummary():MapConflictSummary</code></b>
   <dd>

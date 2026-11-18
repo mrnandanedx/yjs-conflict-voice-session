@@ -20,7 +20,8 @@ import {
   noAttributionsManager,
   transact,
   MapConflictError,
-  getMapConflictType,
+  createMapConflict,
+  createMapWriteSnapshot,
   getMapParentName,
   ContentDoc, UpdateEncoderV1, UpdateEncoderV2, Doc, Snapshot, Transaction, EventHandler, YEvent, Item, createAttributionFromAttributionItems, AbstractAttributionManager // eslint-disable-line
 } from './internals.js'
@@ -1732,8 +1733,8 @@ export const typeListDelete = (transaction, parent, index, length) => {
 }
 
 /**
- * Applies `doc.mapConflictPolicy` to a local write that is about to happen. With `record`, the
- * earlier write loses because the new write replaces it. With `error`, the new write loses.
+ * Applies `doc.mapConflictPolicy` to a local write that is about to happen. With `record`, the new
+ * write wins because it replaces the earlier write. With `error`, the earlier write wins.
  *
  * @param {Transaction} transaction
  * @param {YType} parent
@@ -1749,21 +1750,10 @@ const trackMapKeyWrite = (transaction, parent, key, operation, value) => {
   const policy = doc.mapConflictPolicy
   if (policy === 'allow') return
   const latestWrites = map.setIfUndefined(transaction._mapKeysWritten, parent, () => /** @type {Map<string,any>} */ (new Map()))
-  const write = { operation, value, clientID: doc.clientID, origin: transaction.origin, time: time.getUnixTime() }
+  const write = createMapWriteSnapshot(key, operation, value, doc.clientID, transaction.origin, time.getUnixTime())
   const previous = latestWrites.get(key)
   if (previous !== undefined) {
-    const [loser, accepted] = policy === 'error' ? [write, previous] : [previous, write]
-    const conflict = {
-      ...loser,
-      source: /** @type {'local'} */ ('local'),
-      type: getMapConflictType(loser.value, accepted),
-      key,
-      parent,
-      parentName: getMapParentName(parent),
-      currentValue: typeMapGet(parent, key),
-      policy,
-      accepted
-    }
+    const conflict = createMapConflict('local', key, getMapParentName(parent), previous, write, policy === 'error' ? 'writeA' : 'writeB')
     doc._mapConflicts.push(conflict)
     if (policy === 'error') {
       throw new MapConflictError(conflict)

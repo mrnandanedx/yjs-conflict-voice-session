@@ -1,25 +1,32 @@
 import {
   ContentDeleted,
   ContentType,
+  Doc,
   Item,
   MapConflictError,
-  getMapConflictType,
-  getMapParentName,
+  UpdateEncoderV2,
   YType,
+  applyUpdateV2,
+  createID,
+  createMapConflict,
+  createMapWriteSnapshot,
+  encodeStateAsUpdateV2,
+  findRootTypeKey,
   getItem,
+  getMapParentName,
   getState,
-  typeMapGet,
-  BlockSet, Doc, GC, ID, Skip, Transaction // eslint-disable-line
+  writeBlockSet,
+  BlockSet, GC, ID, Skip, Transaction // eslint-disable-line
 } from '../internals.js'
 
+import * as encoding from 'lib0/encoding'
 import * as map from 'lib0/map'
 import * as time from 'lib0/time'
 
 /**
  * @typedef {Object} RemoteWrite
  * @property {ID} lastId The last id of the written item.
- * @property {number} length The length of the written item.
- * @property {import('./Doc.js').MapWrite} write
+ * @property {import('./Doc.js').MapWriteSnapshot} write
  */
 
 /**
@@ -28,9 +35,7 @@ import * as time from 'lib0/time'
  * @typedef {Object} RemoteMapConflict
  * @property {YType<any>|string} parent The type that owns the key, or a placeholder if it is unknown.
  * @property {string} key
- * @property {any} currentValue The value of the key before the update.
  * @property {RemoteWrite|null} local The current local write, if the update doesn't build on it.
- * @property {import('./Doc.js').MapWrite|null} current The current local write of this key.
  * @property {Array<RemoteWrite>} incoming The concurrent writes in the update.
  */
 
@@ -60,19 +65,46 @@ const findBlock = (blocks, id) => {
 
 /**
  * @param {Doc} doc
+ * @param {ID} id
+ * @return {YType<any>|null} The shared type created by this id, if this doc knows it.
+ */
+const findTypeById = (doc, id) => {
+  if (id.clock < getState(doc.store, id.client) && !doc.store.skips.hasId(id)) {
+    const item = getItem(doc.store, id)
+    if (item instanceof Item && item.content instanceof ContentType) {
+      return item.content.type
+    }
+  }
+  return null
+}
+
+/**
+ * @param {Doc} doc
  * @param {string|ID|YType<any>} parent
  * @return {YType<any>|string}
  */
 const resolveParent = (doc, parent) => {
   if (parent instanceof YType) return parent
   if (typeof parent === 'string') return doc.share.get(parent) ?? `root:${parent}`
-  if (parent.clock < getState(doc.store, parent.client) && !doc.store.skips.hasId(parent)) {
-    const parentItem = getItem(doc.store, parent)
-    if (parentItem instanceof Item && parentItem.content instanceof ContentType) {
-      return parentItem.content.type
-    }
+  return findTypeById(doc, parent) ?? `id:${parent.client}:${parent.clock}`
+}
+
+/**
+ * Finds the type of a conflict in `doc`, which may be a copy of the doc that found the conflict.
+ *
+ * @param {Doc} doc
+ * @param {YType<any>|string} parent
+ * @return {YType<any>|null}
+ */
+const findConflictParent = (doc, parent) => {
+  if (parent instanceof YType) {
+    return parent._item === null
+      ? doc.share.get(findRootTypeKey(parent)) ?? null
+      : findTypeById(doc, parent._item.id)
   }
-  return `id:${parent.client}:${parent.clock}`
+  if (parent.startsWith('root:')) return doc.share.get(parent.slice(5)) ?? null
+  const [, client, clock] = parent.split(':')
+  return findTypeById(doc, createID(Number(client), Number(clock)))
 }
 
 /**
@@ -129,21 +161,22 @@ const resolveMapEntry = (doc, blocks, item, resolved) => {
 
 /**
  * @param {Item} item
+ * @param {string} key
  * @param {any} origin
  * @return {RemoteWrite}
  */
-const createRemoteWrite = (item, origin) => {
+const createRemoteWrite = (item, key, origin) => {
   const isDelete = item.deleted || item.content instanceof ContentDeleted
   return {
     lastId: item.lastId,
-    length: item.length,
-    write: {
-      operation: isDelete ? 'delete' : 'set',
-      value: isDelete ? undefined : item.content.getContent()[item.length - 1],
-      clientID: item.id.client,
+    write: createMapWriteSnapshot(
+      key,
+      isDelete ? 'delete' : 'set',
+      isDelete ? undefined : item.content.getContent()[item.length - 1],
+      item.id.client,
       origin,
-      time: time.getUnixTime()
-    }
+      time.getUnixTime()
+    )
   }
 }
 
@@ -199,19 +232,12 @@ export const findRemoteMapConflicts = (transaction, blocks) => {
       )
       const incoming = items
         .filter(item => !superseded.has(item) && !(item.content instanceof ContentDeleted))
-        .map(item => createRemoteWrite(item, transaction.origin))
-      const local = head !== null ? createRemoteWrite(head, null) : null
+        .map(item => createRemoteWrite(item, key, transaction.origin))
+      const local = headIsTip ? createRemoteWrite(head, key, null) : null
       const writers = new Set(incoming.map(({ write }) => write.clientID))
-      if (headIsTip && local !== null) writers.add(local.write.clientID)
+      if (local !== null) writers.add(local.write.clientID)
       if (writers.size > 1) {
-        conflicts.push({
-          parent,
-          key,
-          currentValue: parent instanceof YType ? typeMapGet(parent, key) : undefined,
-          local: headIsTip ? local : null,
-          current: local && local.write,
-          incoming
-        })
+        conflicts.push({ parent, key, local, incoming })
       }
     })
   })
@@ -219,69 +245,70 @@ export const findRemoteMapConflicts = (transaction, blocks) => {
 }
 
 /**
- * @param {Doc} doc
- * @param {RemoteMapConflict} conflict
- * @param {RemoteWrite} loser
- * @param {import('./Doc.js').MapWrite|null} accepted
- * @return {import('./Doc.js').MapConflict}
+ * @param {YType<any>|string} parent
+ * @return {string}
  */
-const logRemoteConflict = (doc, conflict, loser, accepted) => {
-  const id = `${loser.lastId.client}:${loser.lastId.clock}`
-  const recorded = doc._recordedRemoteMapConflicts.get(id)
-  // Providers deliver a refused update again on every sync
-  if (recorded !== undefined) return recorded
-  const parent = typeof conflict.parent === 'string' && conflict.parent.startsWith('root:')
-    ? doc.get(conflict.parent.slice(5))
-    : conflict.parent
-  const record = {
-    ...loser.write,
-    source: /** @type {'remote'} */ ('remote'),
-    type: getMapConflictType(loser.write.value, accepted),
-    key: conflict.key,
-    parent: parent instanceof YType ? parent : null,
-    parentName: parent instanceof YType ? getMapParentName(parent) : parent.slice(3),
-    currentValue: conflict.currentValue,
-    policy: /** @type {'record'|'error'} */ (doc.mapConflictPolicy),
-    accepted
-  }
-  doc._recordedRemoteMapConflicts.set(id, record)
-  doc._mapConflicts.push(record)
-  return record
+const getConflictParentName = parent => {
+  if (parent instanceof YType) return getMapParentName(parent)
+  return parent.startsWith('root:') ? parent.slice(5) : parent.slice(3)
 }
 
 /**
- * Records the conflicts of an update and refuses the update.
+ * Records every write that loses against the write `head` holds after merging.
+ *
+ * @param {Doc} doc
+ * @param {RemoteMapConflict} conflict
+ * @param {Item|undefined} head The entry of the key after the update is merged.
+ * @return {Array<import('./Doc.js').MapConflict>}
+ */
+const recordRemoteConflict = (doc, conflict, head) => {
+  const writes = conflict.local !== null ? [conflict.local, ...conflict.incoming] : conflict.incoming
+  const byClient = writes.slice().sort((a, b) => b.lastId.client - a.lastId.client)
+  const winner = (head && writes.find(({ lastId }) =>
+    lastId.client === head.id.client && lastId.clock >= head.id.clock && lastId.clock < head.id.clock + head.length
+  )) ?? byClient[0]
+  return writes.filter(({ lastId }) => lastId.client !== winner.lastId.client).map(loser => {
+    const [writeA, writeB] = loser.lastId.client < winner.lastId.client ? [loser, winner] : [winner, loser]
+    const id = `${writeA.lastId.client}:${writeA.lastId.clock}|${writeB.lastId.client}:${writeB.lastId.clock}`
+    return map.setIfUndefined(doc._recordedRemoteMapConflicts, id, () => {
+      const source = writeA.write.clientID === doc.clientID || writeB.write.clientID === doc.clientID ? 'mixed' : 'remote'
+      const record = createMapConflict(source, conflict.key, getConflictParentName(conflict.parent), writeA.write, writeB.write, writeA === winner ? 'writeA' : 'writeB')
+      doc._mapConflicts.push(record)
+      return record
+    })
+  })
+}
+
+/**
+ * Records the conflicts of an update and refuses the update. The update is merged into a copy of
+ * this doc to find the winner that peers get when they accept the update.
  *
  * @param {Doc} doc
  * @param {Array<RemoteMapConflict>} conflicts
+ * @param {BlockSet} blocks The new blocks of the update.
  */
-export const rejectRemoteMapConflicts = (doc, conflicts) => {
+export const rejectRemoteMapConflicts = (doc, conflicts, blocks) => {
+  const encoder = new UpdateEncoderV2()
+  writeBlockSet(encoder, blocks)
+  encoding.writeVarUint(encoder.restEncoder, 0) // the winner doesn't depend on deletes
+  const merged = new Doc()
+  applyUpdateV2(merged, encodeStateAsUpdateV2(doc))
+  applyUpdateV2(merged, encoder.toUint8Array())
   const records = conflicts.flatMap(conflict =>
-    conflict.incoming.map(write => logRemoteConflict(doc, conflict, write, conflict.current))
+    recordRemoteConflict(doc, conflict, findConflictParent(merged, conflict.parent)?._map.get(conflict.key))
   )
+  merged.destroy()
   throw new MapConflictError(records[0], records)
 }
 
 /**
- * Logs conflicts of an update that was applied. The write that the merge kept is only known after
- * the update is integrated.
+ * Records the conflicts of an update that was merged into this doc.
  *
  * @param {Doc} doc
  * @param {Array<RemoteMapConflict>} conflicts
  */
 export const logMergedMapConflicts = (doc, conflicts) => {
   conflicts.forEach(conflict => {
-    const parent = typeof conflict.parent === 'string' && conflict.parent.startsWith('root:')
-      ? doc.share.get(conflict.parent.slice(5))
-      : conflict.parent
-    const head = parent instanceof YType ? parent._map.get(conflict.key) : undefined
-    const writes = conflict.local !== null ? [conflict.local, ...conflict.incoming] : conflict.incoming
-    const winner = head && writes.find(({ lastId }) =>
-      lastId.client === head.id.client && lastId.clock >= head.id.clock && lastId.clock < head.id.clock + head.length
-    )
-    const accepted = winner ? winner.write : conflict.current
-    writes.forEach(write => {
-      if (write !== winner) logRemoteConflict(doc, conflict, write, accepted)
-    })
+    recordRemoteConflict(doc, conflict, findConflictParent(doc, conflict.parent)?._map.get(conflict.key))
   })
 }

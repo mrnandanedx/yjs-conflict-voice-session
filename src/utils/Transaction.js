@@ -133,7 +133,7 @@ export class Transaction {
     /**
      * The latest local write to each map key in this transaction. Only populated when
      * `doc.mapConflictPolicy` is not `allow`.
-     * @type {Map<YType,Map<string,import('./Doc.js').MapWrite>>}
+     * @type {Map<YType,Map<string,import('./Doc.js').MapWriteSnapshot>>}
      */
     this._mapKeysWritten = new Map()
   }

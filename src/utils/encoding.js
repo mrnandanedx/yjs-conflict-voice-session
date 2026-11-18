@@ -371,7 +371,7 @@ export const readUpdateV2 = (decoder, ydoc, transactionOrigin, structDecoder = n
     ss.exclude(knownState)
     const mapConflicts = doc.mapConflictPolicy === 'allow' ? [] : findRemoteMapConflicts(transaction, ss)
     if (mapConflicts.length > 0 && doc.mapConflictPolicy === 'error') {
-      rejectRemoteMapConflicts(doc, mapConflicts)
+      rejectRemoteMapConflicts(doc, mapConflicts, ss)
     }
     // console.log('time to read structs: ', performance.now() - start) // @todo remove
     // start = performance.now()

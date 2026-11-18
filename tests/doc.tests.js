@@ -359,12 +359,14 @@ export const testSyncDocsEvent = async _tc => {
  *
  * @param {any} [aliceValue]
  * @param {any} [bobValue]
+ * @param {number} [aliceClient]
+ * @param {number} [bobClient]
  */
-const createConcurrentWrites = (aliceValue = 'alice', bobValue = 'bob') => {
+const createConcurrentWrites = (aliceValue = 'alice', bobValue = 'bob', aliceClient = 1, bobClient = 2) => {
   const alice = new Y.Doc()
-  alice.clientID = 1
+  alice.clientID = aliceClient
   const bob = new Y.Doc()
-  bob.clientID = 2
+  bob.clientID = bobClient
   alice.get().setAttr('a', aliceValue)
   bob.transact(() => {
     bob.get().setAttr('a', bobValue)
@@ -372,6 +374,11 @@ const createConcurrentWrites = (aliceValue = 'alice', bobValue = 'bob') => {
   })
   return { alice, bob, aliceUpdate: Y.encodeStateAsUpdate(alice), bobUpdate: Y.encodeStateAsUpdate(bob) }
 }
+
+/**
+ * @param {import('../src/utils/Doc.js').MapConflict} conflict
+ */
+const getWinner = conflict => conflict[conflict.resolution.winner]
 
 /**
  * @param {t.TestCase} _tc
@@ -407,8 +414,9 @@ export const testMapConflictPolicyRejectsUnknownValue = _tc => {
 /**
  * @param {t.TestCase} _tc
  */
-export const testMapConflictPolicyRecordLocal = _tc => {
+export const testMapConflictRecordShapeLocal = _tc => {
   const ydoc = new Y.Doc({ mapConflictPolicy: 'record' })
+  ydoc.clientID = 7
   const ymap = ydoc.get('settings')
   const other = ydoc.get('other')
   ydoc.transact(() => {
@@ -424,20 +432,31 @@ export const testMapConflictPolicyRecordLocal = _tc => {
   t.assert(ymap.getAttr('a') === undefined)
   const conflicts = ydoc.getMapConflicts()
   t.assert(conflicts.length === 2)
-  const [first, second] = conflicts
-  t.assert(first.source === 'local' && first.policy === 'record' && first.type === 'value')
-  t.assert(first.key === 'a' && first.parent === ymap && first.parentName === 'settings')
-  t.assert(first.operation === 'set' && first.value === 1 && first.currentValue === 1)
-  t.assert(first.origin === 'alice' && first.clientID === ydoc.clientID)
-  t.assert(first.accepted?.operation === 'set' && first.accepted?.value === 2)
-  t.assert(second.value === 2 && second.accepted?.operation === 'delete')
+  const [setSet, setDelete] = conflicts
+  t.assert(setSet.type === 'set-set' && setSet.key === 'a' && setSet.parent === 'settings')
+  t.assert(setSet.source === 'local' && setSet.ambiguous === false)
+  t.assert(setSet.writeA.value === 1 && setSet.writeB.value === 2)
+  t.assert(setSet.writeA.clientID === 7 && setSet.writeA.origin === 'alice')
+  t.assert(setSet.writeA.summary === 'client 7 set "a" to 1')
+  t.compare(setSet.resolution, { winner: 'writeB', strategy: 'deterministic' })
+  t.assert(setSet.message.includes(setSet.writeA.summary) && setSet.message.includes('"settings"'))
+  t.assert(setDelete.type === 'delete-set')
+  t.assert(setDelete.writeB.operation === 'delete' && setDelete.writeB.value === undefined)
+  t.assert(setDelete.writeB.summary === 'client 7 deleted "a"')
+  // a delete before a set has the same type
+  ymap.setAttr('c', 1)
+  ydoc.transact(() => {
+    ymap.deleteAttr('c')
+    ymap.setAttr('c', 2)
+  })
+  t.assert(ydoc.getMapConflicts()[2].type === 'delete-set')
   // each transaction tracks its writes separately
-  ymap.setAttr('a', 5)
-  ymap.setAttr('a', 6)
-  t.assert(ydoc.getMapConflicts().length === 2)
+  ymap.setAttr('d', 1)
+  ymap.setAttr('d', 2)
+  t.assert(ydoc.getMapConflicts().length === 3)
   // the returned list is a copy
   ydoc.getMapConflicts().length = 0
-  t.assert(ydoc.getMapConflicts().length === 2)
+  t.assert(ydoc.getMapConflicts().length === 3)
   // allow mode doesn't report conflicts recorded earlier
   ydoc.mapConflictPolicy = 'allow'
   t.compare(ydoc.getMapConflicts(), [])
@@ -450,7 +469,6 @@ export const testMapConflictPolicyRecordLocal = _tc => {
 export const testMapConflictPolicyErrorLocal = _tc => {
   const ydoc = new Y.Doc({ mapConflictPolicy: 'error' })
   const ymap = ydoc.get()
-  const origin = { name: 'test-origin' }
   /**
    * @type {any}
    */
@@ -459,26 +477,18 @@ export const testMapConflictPolicyErrorLocal = _tc => {
     ydoc.transact(() => {
       ymap.setAttr('a', 1)
       ymap.setAttr('a', 2)
-    }, origin)
+    })
   } catch (err) {
     caught = err
   }
   t.assert(caught instanceof Y.MapConflictError)
-  t.assert(caught.name === 'MapConflictError' && caught.message.includes('"a"'))
-  const conflict = caught.conflict
-  t.assert(conflict.source === 'local' && conflict.policy === 'error')
-  t.assert(conflict.operation === 'set' && conflict.value === 2 && conflict.currentValue === 1)
-  t.assert(conflict.origin === origin && conflict.accepted.value === 1)
-  t.assert(ydoc.getMapConflicts()[0] === conflict)
+  t.assert(caught.name === 'MapConflictError')
+  t.assert(caught.message === caught.conflict.message)
+  t.assert(caught.conflict.source === 'local')
+  t.assert(caught.conflict.resolution.winner === 'writeA')
+  t.assert(ydoc.getMapConflicts()[0] === caught.conflict)
   // the first write is kept because transactions don't roll back
   t.assert(ymap.getAttr('a') === 1)
-  t.fails(() => {
-    ydoc.transact(() => {
-      ymap.deleteAttr('a')
-      ymap.setAttr('a', 3)
-    })
-  })
-  t.assert(ymap.getAttr('a') === undefined)
   // a rejected value doesn't count as a write
   ydoc.transact(() => {
     t.fails(() => {
@@ -487,7 +497,7 @@ export const testMapConflictPolicyErrorLocal = _tc => {
     ymap.setAttr('b', 1)
   })
   t.assert(ymap.getAttr('b') === 1)
-  t.assert(ydoc.getMapConflicts().length === 2)
+  t.assert(ydoc.getMapConflicts().length === 1)
 }
 
 /**
@@ -510,12 +520,33 @@ export const testMapConflictPolicyRecordRemote = _tc => {
   t.assert(reversed.get().getAttr('a') === winner)
   t.assert(ydoc.get().getAttr('other') === 'bob')
   t.assert(ydoc.getMapConflicts().length === 1)
-  t.assert(reversed.getMapConflicts().length === 1)
   const conflict = ydoc.getMapConflicts()[0]
-  t.assert(conflict.source === 'remote' && conflict.policy === 'record')
-  t.assert(conflict.key === 'a' && conflict.parent === ydoc.get() && conflict.parentName === '')
-  t.assert(conflict.currentValue === 'alice')
-  t.assert(conflict.accepted?.value === winner && conflict.value !== winner)
+  t.assert(conflict.source === 'remote' && conflict.type === 'set-set')
+  t.assert(conflict.key === 'a' && conflict.parent === '')
+  // both delivery orders describe the conflict the same way
+  t.assert(conflict.writeA.clientID === 1 && conflict.writeB.clientID === 2)
+  t.assert(getWinner(conflict).value === winner)
+  const other = reversed.getMapConflicts()[0]
+  t.compare(other.resolution, conflict.resolution)
+  t.assert(other.writeA.clientID === 1 && other.writeB.clientID === 2)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictSourceMixed = _tc => {
+  const bob = new Y.Doc()
+  bob.clientID = 2
+  bob.get().setAttr('a', 'bob')
+  const ydoc = new Y.Doc({ mapConflictPolicy: 'record' })
+  ydoc.clientID = 1
+  ydoc.get().setAttr('a', 'local')
+  ydoc.get().deleteAttr('a')
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(bob))
+  const conflict = ydoc.getMapConflicts()[0]
+  t.assert(conflict.source === 'mixed')
+  t.assert(conflict.type === 'delete-set')
+  t.assert(conflict.writeA.operation === 'delete' && conflict.writeB.value === 'bob')
 }
 
 /**
@@ -538,10 +569,8 @@ export const testMapConflictPolicyErrorRemote = _tc => {
     caught = err
   }
   t.assert(caught instanceof Y.MapConflictError)
-  t.assert(caught.conflict.source === 'remote' && caught.conflict.policy === 'error')
-  t.assert(caught.conflict.clientID === 2 && caught.conflict.value === 'bob')
-  t.assert(caught.conflict.origin === 'from-bob')
-  t.assert(caught.conflict.accepted.value === 'alice' && caught.conflict.accepted.clientID === 1)
+  t.assert(caught.conflict.source === 'remote')
+  t.assert(caught.conflict.writeB.value === 'bob' && caught.conflict.writeB.origin === 'from-bob')
   t.assert(caught.conflicts.length === 1)
   // nothing from the update is applied
   t.assert(ydoc.get().getAttr('a') === 'alice')
@@ -553,6 +582,29 @@ export const testMapConflictPolicyErrorRemote = _tc => {
     Y.applyUpdate(ydoc, bobUpdate)
   })
   t.assert(ydoc.getMapConflicts().length === 1)
+}
+
+/**
+ * The winner must match what peers get by merging, even if this doc applies nothing.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictWinnerMatchesMergeWhenRefused = _tc => {
+  [[1, 2], [2, 1], [100, 3], [3, 100]].forEach(([aliceClient, bobClient]) => {
+    const { aliceUpdate, bobUpdate } = createConcurrentWrites('alice', 'bob', aliceClient, bobClient)
+    const reference = new Y.Doc()
+    Y.applyUpdate(reference, aliceUpdate)
+    Y.applyUpdate(reference, bobUpdate)
+    const ydoc = new Y.Doc({ mapConflictPolicy: 'error' })
+    Y.applyUpdate(ydoc, aliceUpdate)
+    t.fails(() => {
+      Y.applyUpdate(ydoc, bobUpdate)
+    })
+    t.assert(ydoc.get().getAttr('a') === 'alice')
+    const conflict = ydoc.getMapConflicts()[0]
+    t.assert(conflict.resolution.strategy === 'deterministic')
+    t.assert(getWinner(conflict).value === reference.get().getAttr('a'))
+  })
 }
 
 /**
@@ -594,14 +646,16 @@ export const testMapConflictPolicyLoadsResolvedHistory = _tc => {
  */
 export const testMapConflictPolicyInMergedUpdate = _tc => {
   const { aliceUpdate, bobUpdate } = createConcurrentWrites()
+  const reference = new Y.Doc()
+  Y.applyUpdate(reference, Y.mergeUpdates([aliceUpdate, bobUpdate]))
   const ydoc = new Y.Doc({ mapConflictPolicy: 'error' })
   t.fails(() => {
     Y.applyUpdate(ydoc, Y.mergeUpdates([aliceUpdate, bobUpdate]))
   })
-  // neither write is applied, so both are recorded and no write was kept
-  t.compare(ydoc.getMapConflicts().map(conflict => conflict.value).sort(), ['alice', 'bob'])
-  t.assert(ydoc.getMapConflicts().every(conflict => conflict.accepted === null))
+  // the merged update applies nothing, but the winner is still filled in
   t.assert(ydoc.get().getAttr('a') === undefined)
+  t.assert(ydoc.getMapConflicts().length === 1)
+  t.assert(getWinner(ydoc.getMapConflicts()[0]).value === reference.get().getAttr('a'))
 }
 
 /**
@@ -625,8 +679,9 @@ export const testMapConflictPolicyOnNestedMap = _tc => {
   const nested = ydoc.get().getAttr('nested')
   t.assert(nested.getAttr('a') === 'alice')
   t.assert(ydoc.getMapConflicts().length === 1)
-  t.assert(ydoc.getMapConflicts()[0].parent === nested)
-  t.assert(ydoc.getMapConflicts()[0].parentName === `${nested._item.id.client}:${nested._item.id.clock}`)
+  t.assert(ydoc.getMapConflicts()[0].parent === `${nested._item.id.client}:${nested._item.id.clock}`)
+  Y.applyUpdate(alice, Y.encodeStateAsUpdate(bob))
+  t.assert(getWinner(ydoc.getMapConflicts()[0]).value === alice.get().getAttr('nested').getAttr('a'))
 }
 
 /**
@@ -675,13 +730,15 @@ export const testMapConflictAmbiguousLocal = _tc => {
     ymap.setAttr('earlierSubdoc', new Y.Doc())
     ymap.deleteAttr('earlierSubdoc')
   })
-  t.compare(ydoc.getMapConflicts().map(conflict => [conflict.key, conflict.type]), [
-    ['plain', 'value'],
-    ['laterType', 'ambiguous'],
-    ['earlierType', 'ambiguous'],
-    ['laterSubdoc', 'ambiguous'],
-    ['earlierSubdoc', 'ambiguous']
+  t.compare(ydoc.getMapConflicts().map(conflict => [conflict.key, conflict.ambiguous]), [
+    ['plain', false],
+    ['laterType', true],
+    ['earlierType', true],
+    ['laterSubdoc', true],
+    ['earlierSubdoc', true]
   ])
+  t.assert(ydoc.getMapConflicts()[1].writeB.summary.endsWith('a shared type'))
+  t.assert(ydoc.getMapConflicts()[3].writeB.summary.endsWith('a subdocument'))
 }
 
 /**
@@ -697,7 +754,7 @@ export const testMapConflictAmbiguousRemote = _tc => {
    * @param {any} aliceValue
    * @param {any} bobValue
    */
-  const getConflictType = (policy, aliceValue, bobValue) => {
+  const isAmbiguous = (policy, aliceValue, bobValue) => {
     const { aliceUpdate, bobUpdate } = createConcurrentWrites(aliceValue, bobValue)
     const ydoc = new Y.Doc({ mapConflictPolicy: policy })
     Y.applyUpdate(ydoc, aliceUpdate)
@@ -707,14 +764,14 @@ export const testMapConflictAmbiguousRemote = _tc => {
       t.assert(err instanceof Y.MapConflictError)
     }
     t.assert(ydoc.getMapConflicts().length === 1)
-    return ydoc.getMapConflicts()[0].type
+    return ydoc.getMapConflicts()[0].ambiguous
   }
   policies.forEach(policy => {
-    t.assert(getConflictType(policy, 'alice', 'bob') === 'value')
-    t.assert(getConflictType(policy, 'alice', new Y.Type()) === 'ambiguous')
-    t.assert(getConflictType(policy, new Y.Type(), 'bob') === 'ambiguous')
-    t.assert(getConflictType(policy, 'alice', new Y.Doc()) === 'ambiguous')
-    t.assert(getConflictType(policy, new Y.Doc(), 'bob') === 'ambiguous')
+    t.assert(!isAmbiguous(policy, 'alice', 'bob'))
+    t.assert(isAmbiguous(policy, 'alice', new Y.Type()))
+    t.assert(isAmbiguous(policy, new Y.Type(), 'bob'))
+    t.assert(isAmbiguous(policy, 'alice', new Y.Doc()))
+    t.assert(isAmbiguous(policy, new Y.Doc(), 'bob'))
   })
 }
 
@@ -730,13 +787,13 @@ export const testMapConflictSummaryCounts = _tc => {
   ydoc.transact(() => {
     settings.setAttr('a', 1)
     settings.setAttr('a', 2)
-    settings.setAttr('a', new Y.Type())
+    settings.setAttr('a', 3)
     settings.setAttr('b', 1)
-    settings.setAttr('b', 2)
+    settings.deleteAttr('b')
   })
   const summary = ydoc.getMapConflictSummary()
   t.assert(summary.count === 4)
-  t.assert(summary.byType.value === 3 && summary.byType.ambiguous === 1)
+  t.assert(summary.byType['set-set'] === 3 && summary.byType['delete-set'] === 1)
   t.assert(summary.byKey.a === 3 && summary.byKey.b === 1)
   t.assert(summary.byParent[''] === 1 && summary.byParent.settings === 3)
   t.assert(summary.bySource.local === 3 && summary.bySource.remote === 1)

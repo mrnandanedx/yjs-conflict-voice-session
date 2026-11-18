@@ -49,12 +49,13 @@ export const generateNewClientId = random.uint32
 /**
  * Describes who wrote what to a map key.
  *
- * @typedef {Object} MapWrite
- * @property {'set'|'delete'} MapWrite.operation The attempted operation.
- * @property {any} MapWrite.value The written value. `undefined` for a delete.
- * @property {number} MapWrite.clientID The client that attempted the write.
- * @property {any} MapWrite.origin The origin of the transaction.
- * @property {number} MapWrite.time Unix time in milliseconds of the write.
+ * @typedef {Object} MapWriteSnapshot
+ * @property {number} MapWriteSnapshot.clientID The client that wrote the key.
+ * @property {'set'|'delete'} MapWriteSnapshot.operation The operation.
+ * @property {any} MapWriteSnapshot.value The written value. `undefined` for a delete.
+ * @property {any} MapWriteSnapshot.origin The origin of the transaction that handled the write.
+ * @property {number} MapWriteSnapshot.time Unix time in milliseconds when this doc saw the write.
+ * @property {string} MapWriteSnapshot.summary A readable description of the write.
  */
 
 /**
@@ -64,42 +65,90 @@ export const generateNewClientId = random.uint32
  * @property {number} MapConflictSummary.count The number of recorded conflicts.
  * @property {Object<string,number>} MapConflictSummary.byType Conflicts by `type`.
  * @property {Object<string,number>} MapConflictSummary.byKey Conflicts by map key.
- * @property {Object<string,number>} MapConflictSummary.byParent Conflicts by `parentName`.
+ * @property {Object<string,number>} MapConflictSummary.byParent Conflicts by `parent`.
  * @property {Object<string,number>} MapConflictSummary.bySource Conflicts by `source`.
  */
 
 /**
- * Describes a map write that lost a conflict. `source` is `local` for a repeated write in one
- * transaction, and `remote` for concurrent writes by two clients found in an incoming update.
+ * Two writes to the same map key.
  *
  * @typedef {Object} MapConflict
- * @property {'local'|'remote'} MapConflict.source Where the conflict was detected.
- * @property {'value'|'ambiguous'} MapConflict.type `ambiguous` if the losing or the kept value is a
- * shared type or a subdocument. These values hold their own content, so comparing the two writes
- * doesn't tell what was lost.
- * @property {string} MapConflict.key The map key that was written more than once.
- * @property {YType<any>|null} MapConflict.parent The type that owns the key. `null` if this doc
- * doesn't know the type because the update that creates it was not applied.
- * @property {string} MapConflict.parentName The name of a top-level parent, or `client:clock` of a
+ * @property {'set-set'|'delete-set'} MapConflict.type `delete-set` if one of the writes is a delete,
+ * in either order.
+ * @property {string} MapConflict.key The map key.
+ * @property {string} MapConflict.parent The name of a top-level parent, or `client:clock` of a
  * nested parent.
- * @property {'set'|'delete'} MapConflict.operation The losing operation.
- * @property {any} MapConflict.value The losing value. `undefined` for a delete.
- * @property {any} MapConflict.currentValue The value of the key when the conflict was detected.
- * @property {'record'|'error'} MapConflict.policy The policy that handled the conflict.
- * @property {any} MapConflict.origin The origin of the transaction.
- * @property {number} MapConflict.clientID The client that wrote the losing value.
- * @property {number} MapConflict.time Unix time in milliseconds when the conflict was detected.
- * @property {MapWrite|null} MapConflict.accepted The write that was kept. `null` if the key has no
- * value on this doc because the whole update was refused.
+ * @property {'local'|'remote'|'mixed'} MapConflict.source `local` for a repeated write in one
+ * transaction, `mixed` if this client wrote one of two concurrent writes, and `remote` if other
+ * clients wrote both.
+ * @property {string} MapConflict.message A readable description of the conflict.
+ * @property {MapWriteSnapshot} MapConflict.writeA The earlier write of a local conflict, or the
+ * write of the lower client id of a concurrent conflict.
+ * @property {MapWriteSnapshot} MapConflict.writeB The other write.
+ * @property {{winner:'writeA'|'writeB',strategy:'deterministic'}} MapConflict.resolution The write
+ * that wins. If an incoming update was refused, this is the write that wins when peers merge it.
+ * @property {boolean} MapConflict.ambiguous Whether a value is a shared type or a subdocument. These
+ * values hold their own content, so comparing the two writes doesn't tell what was lost.
  */
 
 /**
- * @param {any} value The losing value.
- * @param {MapWrite|null} accepted The write that was kept.
- * @return {'value'|'ambiguous'}
+ * @param {any} value
+ * @return {string}
  */
-export const getMapConflictType = (value, accepted) =>
-  [value, accepted?.value].some(v => v instanceof YType || v instanceof Doc) ? 'ambiguous' : 'value'
+const describeMapValue = value => {
+  if (value instanceof YType) return 'a shared type'
+  if (value instanceof Doc) return 'a subdocument'
+  if (value instanceof Uint8Array) return `${value.length} bytes`
+  if (typeof value === 'bigint') return `${value}n`
+  let json
+  try {
+    json = JSON.stringify(value) ?? String(value)
+  } catch (_err) {
+    json = String(value)
+  }
+  return json.length > 80 ? `${json.slice(0, 77)}...` : json
+}
+
+/**
+ * @param {string} key
+ * @param {'set'|'delete'} operation
+ * @param {any} value
+ * @param {number} clientID
+ * @param {any} origin
+ * @param {number} time
+ * @return {MapWriteSnapshot}
+ */
+export const createMapWriteSnapshot = (key, operation, value, clientID, origin, time) => ({
+  clientID,
+  operation,
+  value,
+  origin,
+  time,
+  summary: operation === 'delete'
+    ? `client ${clientID} deleted "${key}"`
+    : `client ${clientID} set "${key}" to ${describeMapValue(value)}`
+})
+
+/**
+ * @param {'local'|'remote'|'mixed'} source
+ * @param {string} key
+ * @param {string} parent
+ * @param {MapWriteSnapshot} writeA
+ * @param {MapWriteSnapshot} writeB
+ * @param {'writeA'|'writeB'} winner
+ * @return {MapConflict}
+ */
+export const createMapConflict = (source, key, parent, writeA, writeB, winner) => ({
+  type: writeA.operation === 'set' && writeB.operation === 'set' ? 'set-set' : 'delete-set',
+  key,
+  parent,
+  source,
+  message: `${source === 'local' ? 'Map key written twice in one transaction' : 'Concurrent writes to a map key'}: ${writeA.summary} and ${writeB.summary} in "${parent}"`,
+  writeA,
+  writeB,
+  resolution: { winner, strategy: 'deterministic' },
+  ambiguous: [writeA.value, writeB.value].some(v => v instanceof YType || v instanceof Doc)
+})
 
 /**
  * @param {YType<any>} parent
@@ -119,9 +168,7 @@ export class MapConflictError extends Error {
    * @param {Array<MapConflict>} [conflicts] All conflicts that caused this error.
    */
   constructor (conflict, conflicts = [conflict]) {
-    super(conflict.source === 'remote'
-      ? `Refused update: client ${conflict.clientID} wrote map key "${conflict.key}" concurrently with another client`
-      : `Refused ${conflict.operation} on map key "${conflict.key}": the key was already written in this transaction`)
+    super(conflict.message)
     this.name = 'MapConflictError'
     /**
      * @type {MapConflict}
@@ -364,10 +411,10 @@ export class Doc extends ObservableV2 {
     const increment = (counts, name) => {
       counts[name] = (counts[name] || 0) + 1
     }
-    conflicts.forEach(({ type, key, parentName, source }) => {
+    conflicts.forEach(({ type, key, parent, source }) => {
       increment(summary.byType, type)
       increment(summary.byKey, key)
-      increment(summary.byParent, parentName)
+      increment(summary.byParent, parent)
       increment(summary.bySource, source)
     })
     return summary
