@@ -3,7 +3,8 @@ import {
   ContentType,
   Item,
   MapConflictError,
-  isAmbiguousMapConflict,
+  getMapConflictType,
+  getMapParentName,
   YType,
   getItem,
   getState,
@@ -226,27 +227,30 @@ export const findRemoteMapConflicts = (transaction, blocks) => {
  */
 const logRemoteConflict = (doc, conflict, loser, accepted) => {
   const id = `${loser.lastId.client}:${loser.lastId.clock}`
-  const logged = doc._loggedRemoteMapConflicts.get(id)
+  const recorded = doc._recordedRemoteMapConflicts.get(id)
   // Providers deliver a refused update again on every sync
-  if (logged !== undefined && doc.mapConflicts.includes(logged)) return logged
-  const parent = conflict.parent
+  if (recorded !== undefined) return recorded
+  const parent = typeof conflict.parent === 'string' && conflict.parent.startsWith('root:')
+    ? doc.get(conflict.parent.slice(5))
+    : conflict.parent
   const record = {
     ...loser.write,
     source: /** @type {'remote'} */ ('remote'),
+    type: getMapConflictType(loser.write.value, accepted),
     key: conflict.key,
-    type: parent instanceof YType ? parent : (parent.startsWith('root:') ? doc.get(parent.slice(5)) : null),
+    parent: parent instanceof YType ? parent : null,
+    parentName: parent instanceof YType ? getMapParentName(parent) : parent.slice(3),
     currentValue: conflict.currentValue,
-    strategy: /** @type {'record'|'refuse'|'discard'} */ (doc.remoteMapConflict),
-    accepted,
-    ambiguous: isAmbiguousMapConflict(loser.write.value, accepted)
+    policy: /** @type {'record'|'error'} */ (doc.mapConflictPolicy),
+    accepted
   }
-  doc._loggedRemoteMapConflicts.set(id, record)
-  doc.mapConflicts.push(record)
+  doc._recordedRemoteMapConflicts.set(id, record)
+  doc._mapConflicts.push(record)
   return record
 }
 
 /**
- * Logs conflicts of an update that won't be applied. Throws if the strategy is `refuse`.
+ * Records the conflicts of an update and refuses the update.
  *
  * @param {Doc} doc
  * @param {Array<RemoteMapConflict>} conflicts
@@ -255,9 +259,7 @@ export const rejectRemoteMapConflicts = (doc, conflicts) => {
   const records = conflicts.flatMap(conflict =>
     conflict.incoming.map(write => logRemoteConflict(doc, conflict, write, conflict.current))
   )
-  if (doc.remoteMapConflict === 'refuse') {
-    throw new MapConflictError(records[0], records)
-  }
+  throw new MapConflictError(records[0], records)
 }
 
 /**

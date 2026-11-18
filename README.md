@@ -865,56 +865,43 @@ const doc = new Y.Doc()
 ```
 
 <dl>
-  <b><code>new Y.Doc({ mapConflict: 'overwrite' | 'keep-first' | 'error' })</code></b>
+  <b><code>new Y.Doc({ mapConflictPolicy: 'allow' | 'record' | 'error' })</code></b>
   <dd>
-Controls what happens when a transaction writes to the same map key more than
-once. Setting and deleting a key both count as writes. With
-<code>overwrite</code> (the default), the last write wins. With
-<code>keep-first</code>, the first write wins and later writes to that key are
-ignored. With <code>error</code>, later writes to that key throw a
-<code>Y.MapConflictError</code>. Writes that ran before the error stay applied,
-because transactions don't roll back. This strategy only applies to local writes
-on this doc.
-  </dd>
-  <b><code>new Y.Doc({ remoteMapConflict: string })</code></b>
-  <dd>
-Controls what happens when an incoming update shows that two clients wrote the
-same map key without seeing each other's write. With <code>ignore</code> (the
-default), the update is merged as usual. With <code>record</code>, it is merged
-and the conflict is logged. With <code>refuse</code>, nothing from the update is
-applied, the conflict is logged, and <code>applyUpdate</code> throws a
-<code>Y.MapConflictError</code>. With <code>discard</code>, nothing from the
-update is applied and the conflict is logged, without an error. <br>
-<b>Warning:</b> <code>refuse</code> and <code>discard</code> give up convergence.
+Controls what happens when a map key is written twice in one transaction, or
+when an incoming update shows that two clients wrote the same key without seeing
+each other's write. Setting and deleting a key both count as local writes. With
+<code>allow</code> (the default), every write is applied and nothing is recorded.
+With <code>record</code>, every write is applied and the conflict is recorded.
+With <code>error</code>, the conflict is recorded and a
+<code>Y.MapConflictError</code> is thrown. A repeated local write is not applied,
+but earlier writes in the transaction stay applied because transactions don't
+roll back. Nothing from a conflicting incoming update is applied. <br>
+<b>Warning:</b> <code>error</code> gives up convergence for incoming updates.
 This doc stops matching peers that accepted the update, and later updates that
-build on the rejected one stay pending. Concurrent deletes are not detected,
+build on the refused one stay pending. Concurrent deletes are not detected,
 because a delete doesn't record which write it saw.
   </dd>
-  <b><code>mapConflicts:Array&lt;MapConflict&gt;</code></b>
+  <b><code>getMapConflicts():Array&lt;MapConflict&gt;</code></b>
   <dd>
-The writes that lost a conflict, oldest first. Each record has
-<code>source</code> (<code>local</code> or <code>remote</code>),
-<code>key</code>, <code>type</code>, <code>operation</code>
+Lists the writes that lost a conflict, oldest first. The list is empty when the
+policy is <code>allow</code>. Each record has <code>source</code>
+(<code>local</code> or <code>remote</code>), <code>type</code>, <code>key</code>,
+<code>parent</code>, <code>parentName</code>, <code>operation</code>
 (<code>set</code> or <code>delete</code>), <code>value</code>,
-<code>currentValue</code>, <code>strategy</code>, <code>origin</code>,
-<code>clientID</code>, <code>time</code>, and <code>ambiguous</code>.
-<code>ambiguous</code> is <code>true</code> if the losing or the kept value is a
-shared type or a subdocument. These values hold their own content, so comparing
-the two writes doesn't tell you what was lost. The same record is available as
-<code>error.conflict</code> on a <code>Y.MapConflictError</code>. The log is kept
-in memory on this doc instance. It isn't synced or persisted, and it grows until
-you clear it with <code>doc.mapConflicts.length = 0</code>.
+<code>currentValue</code>, <code>policy</code>, <code>origin</code>,
+<code>clientID</code>, <code>time</code>, and <code>accepted</code> (the write
+that was kept). <code>type</code> is <code>ambiguous</code> if the losing or the
+kept value is a shared type or a subdocument, because these values hold their own
+content and comparing the two writes doesn't tell you what was lost. Otherwise it
+is <code>value</code>. The same record is available as
+<code>error.conflict</code> on a <code>Y.MapConflictError</code>. Records are
+kept in memory on this doc instance and are not synced or persisted.
   </dd>
-  <b><code>getMapConflictSummary():Array&lt;MapConflictSummary&gt;</code></b>
+  <b><code>getMapConflictSummary():MapConflictSummary</code></b>
   <dd>
-Summarizes <code>mapConflicts</code> with one entry per map and key. Each entry
-has <code>type</code>, <code>mapName</code> (<code>null</code> for nested types),
-<code>key</code>, <code>refusedCount</code>, <code>ambiguous</code> (<code>true</code>
-if any conflict on the key is ambiguous), and <code>writes</code>. Each item in
-<code>writes</code> says who wrote what: <code>status</code> (<code>kept</code>,
-<code>refused</code>, or <code>lost</code> for a merged write that another client
-won), <code>clientID</code>, <code>origin</code>,
-<code>operation</code>, <code>value</code>, and <code>time</code>.
+Counts the conflicts from <code>getMapConflicts()</code>. Returns an object with
+the total <code>count</code>, and the counts <code>byType</code>,
+<code>byKey</code>, <code>byParent</code>, and <code>bySource</code>.
   </dd>
   <b><code>clientID</code></b>
   <dd>A unique id that identifies this client. (readonly)</dd>

@@ -7,7 +7,8 @@ import {
   transact,
   applyUpdate,
   ContentDoc, Item, Transaction, // eslint-disable-line
-  encodeStateAsUpdate
+  encodeStateAsUpdate,
+  findRootTypeKey
 } from '../internals.js'
 
 import { YType } from '../ytype.js'
@@ -31,29 +32,18 @@ export const generateNewClientId = random.uint32
  * @property {boolean} [DocOpts.isSuggestionDoc] Set to true if this document merely suggests
  * changes. If this flag is not set in a suggestion document, automatic formatting changes will be
  * displayed as suggestions, which might not be intended.
- * @property {MapConflictStrategy} [DocOpts.mapConflict='overwrite'] How to handle a local write to
- * a map key that was already written in the same transaction.
- * @property {RemoteMapConflictStrategy} [DocOpts.remoteMapConflict='ignore'] How to handle an
- * incoming update in which two clients wrote the same map key without seeing each other's write.
+ * @property {MapConflictPolicy} [DocOpts.mapConflictPolicy='allow'] How to handle a map key that is
+ * written twice in one transaction, or by two clients that didn't see each other's write.
  */
 
 /**
- * - `ignore`: merge the update and log nothing.
- * - `record`: merge the update and log the conflict on `doc.mapConflicts`.
- * - `refuse`: apply nothing from the update, log the conflict, and throw a `MapConflictError`.
- * - `discard`: apply nothing from the update and log the conflict, without throwing.
+ * - `allow`: apply every write and record nothing.
+ * - `record`: apply every write and record the conflict.
+ * - `error`: throw a `MapConflictError` and record the conflict. The repeated local write or the
+ * whole incoming update is not applied. Refusing an update gives up convergence, because this doc
+ * stops matching peers that accepted the update.
  *
- * `refuse` and `discard` give up convergence: this doc stops matching peers that accepted the update.
- *
- * @typedef {'ignore'|'record'|'refuse'|'discard'} RemoteMapConflictStrategy
- */
-
-/**
- * - `overwrite`: the last write wins.
- * - `keep-first`: the first write wins. Later writes to that key are ignored.
- * - `error`: later writes to that key throw an error.
- *
- * @typedef {'overwrite'|'keep-first'|'error'} MapConflictStrategy
+ * @typedef {'allow'|'record'|'error'} MapConflictPolicy
  */
 
 /**
@@ -68,19 +58,14 @@ export const generateNewClientId = random.uint32
  */
 
 /**
- * All refused writes to one key of one map, next to the writes that were kept instead.
+ * Counts the recorded map conflicts.
  *
  * @typedef {Object} MapConflictSummary
- * @property {YType<any>|null} MapConflictSummary.type The type that owns the key. `null` if this
- * doc doesn't know the type.
- * @property {string|null} MapConflictSummary.mapName The name of the type if it is a top-level
- * type. `null` if the type is nested.
- * @property {string} MapConflictSummary.key The map key.
- * @property {number} MapConflictSummary.refusedCount The number of refused writes.
- * @property {boolean} MapConflictSummary.ambiguous Whether any conflict on this key is ambiguous.
- * @property {Array<MapWrite & { status: 'kept'|'refused'|'lost' }>} MapConflictSummary.writes Every
- * kept, refused, and lost write, oldest first. A `lost` write was merged, but another client's
- * write to the key won.
+ * @property {number} MapConflictSummary.count The number of recorded conflicts.
+ * @property {Object<string,number>} MapConflictSummary.byType Conflicts by `type`.
+ * @property {Object<string,number>} MapConflictSummary.byKey Conflicts by map key.
+ * @property {Object<string,number>} MapConflictSummary.byParent Conflicts by `parentName`.
+ * @property {Object<string,number>} MapConflictSummary.bySource Conflicts by `source`.
  */
 
 /**
@@ -89,35 +74,44 @@ export const generateNewClientId = random.uint32
  *
  * @typedef {Object} MapConflict
  * @property {'local'|'remote'} MapConflict.source Where the conflict was detected.
+ * @property {'value'|'ambiguous'} MapConflict.type `ambiguous` if the losing or the kept value is a
+ * shared type or a subdocument. These values hold their own content, so comparing the two writes
+ * doesn't tell what was lost.
  * @property {string} MapConflict.key The map key that was written more than once.
- * @property {YType<any>|null} MapConflict.type The type that owns the key. `null` if this doc
+ * @property {YType<any>|null} MapConflict.parent The type that owns the key. `null` if this doc
  * doesn't know the type because the update that creates it was not applied.
+ * @property {string} MapConflict.parentName The name of a top-level parent, or `client:clock` of a
+ * nested parent.
  * @property {'set'|'delete'} MapConflict.operation The losing operation.
  * @property {any} MapConflict.value The losing value. `undefined` for a delete.
  * @property {any} MapConflict.currentValue The value of the key when the conflict was detected.
- * @property {'keep-first'|'error'|'record'|'refuse'|'discard'} MapConflict.strategy The strategy
- * that handled the conflict.
+ * @property {'record'|'error'} MapConflict.policy The policy that handled the conflict.
  * @property {any} MapConflict.origin The origin of the transaction.
  * @property {number} MapConflict.clientID The client that wrote the losing value.
  * @property {number} MapConflict.time Unix time in milliseconds when the conflict was detected.
  * @property {MapWrite|null} MapConflict.accepted The write that was kept. `null` if the key has no
  * value on this doc because the whole update was refused.
- * @property {boolean} MapConflict.ambiguous Whether the losing or the kept value is a shared type
- * or a subdocument. These values hold their own content, so comparing the two writes doesn't tell
- * what was lost.
  */
 
 /**
  * @param {any} value The losing value.
  * @param {MapWrite|null} accepted The write that was kept.
- * @return {boolean}
+ * @return {'value'|'ambiguous'}
  */
-export const isAmbiguousMapConflict = (value, accepted) =>
-  [value, accepted?.value].some(v => v instanceof YType || v instanceof Doc)
+export const getMapConflictType = (value, accepted) =>
+  [value, accepted?.value].some(v => v instanceof YType || v instanceof Doc) ? 'ambiguous' : 'value'
 
 /**
- * Thrown when `doc.mapConflict` is `error` and a transaction writes to a map key more than once,
- * or when `doc.remoteMapConflict` is `refuse` and an incoming update has conflicting writes.
+ * @param {YType<any>} parent
+ * @return {string} The name of a top-level type, or `client:clock` of a nested type.
+ */
+export const getMapParentName = parent => parent._item === null
+  ? findRootTypeKey(parent)
+  : `${parent._item.id.client}:${parent._item.id.clock}`
+
+/**
+ * Thrown when `doc.mapConflictPolicy` is `error` and a transaction writes to a map key more than
+ * once, or an incoming update has conflicting writes.
  */
 export class MapConflictError extends Error {
   /**
@@ -164,35 +158,28 @@ export class Doc extends ObservableV2 {
   /**
    * @param {DocOpts} opts configuration
    */
-  constructor ({ guid = random.uuidv4(), collectionid = null, gc = true, gcFilter = () => true, meta = null, autoLoad = false, shouldLoad = true, isSuggestionDoc = false, mapConflict = 'overwrite', remoteMapConflict = 'ignore' } = {}) {
+  constructor ({ guid = random.uuidv4(), collectionid = null, gc = true, gcFilter = () => true, meta = null, autoLoad = false, shouldLoad = true, isSuggestionDoc = false, mapConflictPolicy = 'allow' } = {}) {
     super()
-    if (mapConflict !== 'overwrite' && mapConflict !== 'keep-first' && mapConflict !== 'error') {
-      throw new Error(`Unknown mapConflict strategy: ${mapConflict}`)
-    }
-    if (remoteMapConflict !== 'ignore' && remoteMapConflict !== 'record' && remoteMapConflict !== 'refuse' && remoteMapConflict !== 'discard') {
-      throw new Error(`Unknown remoteMapConflict strategy: ${remoteMapConflict}`)
+    if (mapConflictPolicy !== 'allow' && mapConflictPolicy !== 'record' && mapConflictPolicy !== 'error') {
+      throw new Error(`Unknown mapConflictPolicy: ${mapConflictPolicy}`)
     }
     /**
-     * @type {RemoteMapConflictStrategy}
+     * @type {MapConflictPolicy}
      */
-    this.remoteMapConflict = remoteMapConflict
+    this.mapConflictPolicy = mapConflictPolicy
     /**
-     * Remote conflicts that were already logged, by the id of the losing write.
+     * Remote conflicts that were already recorded, by the id of the losing write.
      *
      * @type {Map<string,MapConflict>}
      */
-    this._loggedRemoteMapConflicts = new Map()
-    /**
-     * @type {MapConflictStrategy}
-     */
-    this.mapConflict = mapConflict
+    this._recordedRemoteMapConflicts = new Map()
     /**
      * Every map write that lost a conflict, oldest first. This log is kept in memory on this doc
      * instance. It is not synced or persisted.
      *
      * @type {Array<MapConflict>}
      */
-    this.mapConflicts = []
+    this._mapConflicts = []
     this.gc = gc
     this.gcFilter = gcFilter
     this.clientID = generateNewClientId()
@@ -344,40 +331,44 @@ export class Doc extends ObservableV2 {
   }
 
   /**
-   * Summarizes `doc.mapConflicts`, with one entry per map and key, in order of first conflict.
+   * Lists the recorded map conflicts, oldest first. The list is empty if the policy is `allow`.
    *
-   * @return {Array<MapConflictSummary>}
+   * @return {Array<MapConflict>}
+   */
+  getMapConflicts () {
+    return this.mapConflictPolicy === 'allow' ? [] : this._mapConflicts.slice()
+  }
+
+  /**
+   * Counts the conflicts returned by `getMapConflicts`.
+   *
+   * @return {MapConflictSummary}
    */
   getMapConflictSummary () {
+    const conflicts = this.getMapConflicts()
+    // Keys come from remote peers. Without a prototype, a key like `__proto__` is counted as usual.
     /**
-     * @type {Array<MapConflictSummary>}
+     * @type {MapConflictSummary}
      */
-    const summary = []
+    const summary = {
+      count: conflicts.length,
+      byType: Object.create(null),
+      byKey: Object.create(null),
+      byParent: Object.create(null),
+      bySource: Object.create(null)
+    }
     /**
-     * @type {Map<YType<any>|null, Map<string, MapConflictSummary>>}
+     * @param {Object<string,number>} counts
+     * @param {string} name
      */
-    const groups = new Map()
-    /**
-     * @type {Set<MapWrite>}
-     */
-    const listedAccepted = new Set()
-    this.mapConflicts.forEach(({ type, key, operation, value, clientID, origin, time, accepted, strategy, ambiguous }) => {
-      const group = map.setIfUndefined(map.setIfUndefined(groups, type, () => /** @type {Map<string, MapConflictSummary>} */ (new Map())), key, () => {
-        const rootEntry = array.from(this.share.entries()).find(([, rootType]) => rootType === type)
-        /**
-         * @type {MapConflictSummary}
-         */
-        const created = { type, mapName: rootEntry ? rootEntry[0] : null, key, refusedCount: 0, ambiguous: false, writes: [] }
-        summary.push(created)
-        return created
-      })
-      if (accepted !== null && !listedAccepted.has(accepted)) {
-        listedAccepted.add(accepted)
-        group.writes.push({ status: 'kept', ...accepted })
-      }
-      group.refusedCount++
-      group.ambiguous = group.ambiguous || ambiguous
-      group.writes.push({ status: strategy === 'record' ? 'lost' : 'refused', operation, value, clientID, origin, time })
+    const increment = (counts, name) => {
+      counts[name] = (counts[name] || 0) + 1
+    }
+    conflicts.forEach(({ type, key, parentName, source }) => {
+      increment(summary.byType, type)
+      increment(summary.byKey, key)
+      increment(summary.byParent, parentName)
+      increment(summary.bySource, source)
     })
     return summary
   }

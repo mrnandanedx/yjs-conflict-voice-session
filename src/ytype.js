@@ -20,7 +20,8 @@ import {
   noAttributionsManager,
   transact,
   MapConflictError,
-  isAmbiguousMapConflict,
+  getMapConflictType,
+  getMapParentName,
   ContentDoc, UpdateEncoderV1, UpdateEncoderV2, Doc, Snapshot, Transaction, EventHandler, YEvent, Item, createAttributionFromAttributionItems, AbstractAttributionManager // eslint-disable-line
 } from './internals.js'
 
@@ -1731,36 +1732,44 @@ export const typeListDelete = (transaction, parent, index, length) => {
 }
 
 /**
- * Applies `doc.mapConflict` to a local write and remembers the written key. Refused writes are
- * logged on `doc.mapConflicts`.
+ * Applies `doc.mapConflictPolicy` to a local write that is about to happen. With `record`, the
+ * earlier write loses because the new write replaces it. With `error`, the new write loses.
  *
  * @param {Transaction} transaction
  * @param {YType} parent
  * @param {string} key
  * @param {'set'|'delete'} operation
  * @param {YValue} [value]
- * @return {boolean} Whether the write should be applied.
  *
  * @private
  * @function
  */
-const claimMapKeyWrite = (transaction, parent, key, operation, value) => {
+const trackMapKeyWrite = (transaction, parent, key, operation, value) => {
   const doc = transaction.doc
-  const strategy = doc.mapConflict
-  if (strategy === 'overwrite') return true
-  const firstWrites = map.setIfUndefined(transaction._mapKeysWritten, parent, () => /** @type {Map<string,any>} */ (new Map()))
+  const policy = doc.mapConflictPolicy
+  if (policy === 'allow') return
+  const latestWrites = map.setIfUndefined(transaction._mapKeysWritten, parent, () => /** @type {Map<string,any>} */ (new Map()))
   const write = { operation, value, clientID: doc.clientID, origin: transaction.origin, time: time.getUnixTime() }
-  const accepted = firstWrites.get(key)
-  if (accepted === undefined) {
-    firstWrites.set(key, write)
-    return true
+  const previous = latestWrites.get(key)
+  if (previous !== undefined) {
+    const [loser, accepted] = policy === 'error' ? [write, previous] : [previous, write]
+    const conflict = {
+      ...loser,
+      source: /** @type {'local'} */ ('local'),
+      type: getMapConflictType(loser.value, accepted),
+      key,
+      parent,
+      parentName: getMapParentName(parent),
+      currentValue: typeMapGet(parent, key),
+      policy,
+      accepted
+    }
+    doc._mapConflicts.push(conflict)
+    if (policy === 'error') {
+      throw new MapConflictError(conflict)
+    }
   }
-  const conflict = { ...write, source: /** @type {'local'} */ ('local'), key, type: parent, currentValue: typeMapGet(parent, key), strategy, accepted, ambiguous: isAmbiguousMapConflict(value, accepted) }
-  doc.mapConflicts.push(conflict)
-  if (strategy === 'error') {
-    throw new MapConflictError(conflict)
-  }
-  return false
+  latestWrites.set(key, write)
 }
 
 /**
@@ -1775,7 +1784,8 @@ const claimMapKeyWrite = (transaction, parent, key, operation, value) => {
  */
 export const typeMapDelete = (transaction, parent, key) => {
   const c = parent._map.get(key)
-  if (c !== undefined && !c.deleted && claimMapKeyWrite(transaction, parent, key, 'delete')) {
+  if (c !== undefined && !c.deleted) {
+    trackMapKeyWrite(transaction, parent, key, 'delete')
     c.delete(transaction)
   }
 }
@@ -1821,7 +1831,7 @@ export const typeMapSet = (transaction, parent, key, value) => {
         }
     }
   }
-  if (!claimMapKeyWrite(transaction, parent, key, 'set', value)) return
+  trackMapKeyWrite(transaction, parent, key, 'set', value)
   new Item(createID(ownClientId, getState(doc.store, ownClientId)), left, left && left.lastId, null, null, parent, key, content).integrate(transaction, 0)
 }
 

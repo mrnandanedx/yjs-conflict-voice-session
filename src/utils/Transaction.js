@@ -131,8 +131,8 @@ export class Transaction {
     this._needFormattingCleanup = false
     this._done = false
     /**
-     * The first local write to each map key in this transaction. Only populated when
-     * `doc.mapConflict` is not `overwrite`.
+     * The latest local write to each map key in this transaction. Only populated when
+     * `doc.mapConflictPolicy` is not `allow`.
      * @type {Map<YType,Map<string,import('./Doc.js').MapWrite>>}
      */
     this._mapKeysWritten = new Map()

@@ -19,7 +19,6 @@ import {
   getState,
   getStateVector,
   readAndApplyDeleteSet,
-  readIdSet,
   findRemoteMapConflicts,
   rejectRemoteMapConflicts,
   logMergedMapConflicts,
@@ -370,11 +369,9 @@ export const readUpdateV2 = (decoder, ydoc, transactionOrigin, structDecoder = n
     })
     // remove known items from ss
     ss.exclude(knownState)
-    const mapConflicts = doc.remoteMapConflict === 'ignore' ? [] : findRemoteMapConflicts(transaction, ss)
-    if (mapConflicts.length > 0 && doc.remoteMapConflict !== 'record') {
+    const mapConflicts = doc.mapConflictPolicy === 'allow' ? [] : findRemoteMapConflicts(transaction, ss)
+    if (mapConflicts.length > 0 && doc.mapConflictPolicy === 'error') {
       rejectRemoteMapConflicts(doc, mapConflicts)
-      readIdSet(structDecoder) // the update is dropped, but the decoder may be read further
-      return
     }
     // console.log('time to read structs: ', performance.now() - start) // @todo remove
     // start = performance.now()
