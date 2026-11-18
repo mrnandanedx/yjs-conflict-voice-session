@@ -352,3 +352,109 @@ export const testSyncDocsEvent = async _tc => {
   t.assert(!ydoc.isSynced)
   t.assert(ydoc.whenSynced !== oldWhenSynced)
 }
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictOverwrite = _tc => {
+  const ydoc = new Y.Doc()
+  t.assert(ydoc.mapConflict === 'overwrite')
+  const ymap = ydoc.get()
+  ydoc.transact(() => {
+    ymap.setAttr('a', 1)
+    ymap.setAttr('a', 2)
+  })
+  t.assert(ymap.getAttr('a') === 2)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictKeepFirst = _tc => {
+  const ydoc = new Y.Doc({ mapConflict: 'keep-first' })
+  const ymap = ydoc.get()
+  const other = ydoc.get('other')
+  ydoc.transact(() => {
+    ymap.setAttr('a', 1)
+    ymap.setAttr('a', 2)
+    ymap.setAttr('b', 1)
+    ymap.deleteAttr('b')
+    other.setAttr('a', 3) // the same key on another type is not a conflict
+  })
+  t.assert(ymap.getAttr('a') === 1)
+  t.assert(ymap.getAttr('b') === 1)
+  t.assert(other.getAttr('a') === 3)
+  ydoc.transact(() => {
+    ymap.deleteAttr('a')
+    ymap.setAttr('a', 4)
+  })
+  t.assert(ymap.getAttr('a') === undefined)
+  // each transaction tracks its writes separately
+  ymap.setAttr('a', 5)
+  ymap.setAttr('a', 6)
+  t.assert(ymap.getAttr('a') === 6)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictError = _tc => {
+  const ydoc = new Y.Doc({ mapConflict: 'error' })
+  const ymap = ydoc.get()
+  t.fails(() => {
+    ydoc.transact(() => {
+      ymap.setAttr('a', 1)
+      ymap.setAttr('a', 2)
+    })
+  })
+  // the first write is kept because transactions don't roll back
+  t.assert(ymap.getAttr('a') === 1)
+  t.fails(() => {
+    ydoc.transact(() => {
+      ymap.deleteAttr('a')
+      ymap.setAttr('a', 3)
+    })
+  })
+  t.assert(ymap.getAttr('a') === undefined)
+  // deleting a missing key doesn't write anything
+  ydoc.transact(() => {
+    ymap.deleteAttr('missing')
+    ymap.deleteAttr('missing')
+    ymap.setAttr('missing', 1)
+  })
+  t.assert(ymap.getAttr('missing') === 1)
+  // a rejected value doesn't claim the key
+  ydoc.transact(() => {
+    t.fails(() => {
+      ymap.setAttr('b', /** @type {any} */ (new Map()))
+    })
+    ymap.setAttr('b', 1)
+  })
+  t.assert(ymap.getAttr('b') === 1)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictOnlyAppliesToLocalWrites = _tc => {
+  const source = new Y.Doc()
+  source.transact(() => {
+    source.get().setAttr('a', 1)
+    source.get().setAttr('a', 2)
+  })
+  const keepFirst = new Y.Doc({ mapConflict: 'keep-first' })
+  const strict = new Y.Doc({ mapConflict: 'error' })
+  Y.applyUpdate(keepFirst, Y.encodeStateAsUpdate(source))
+  Y.applyUpdate(strict, Y.encodeStateAsUpdate(source))
+  t.assert(keepFirst.get().getAttr('a') === 2)
+  t.assert(strict.get().getAttr('a') === 2)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testMapConflictRejectsUnknownStrategy = _tc => {
+  t.fails(() => {
+    new Y.Doc({ mapConflict: /** @type {any} */ ('unknown') }) // eslint-disable-line no-new
+  })
+}

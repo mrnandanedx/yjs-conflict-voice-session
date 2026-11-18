@@ -28,6 +28,7 @@ import * as traits from 'lib0/traits'
 import * as delta from 'lib0/delta'
 import * as array from 'lib0/array'
 import * as map from 'lib0/map'
+import * as set from 'lib0/set'
 import * as iterator from 'lib0/iterator'
 import * as error from 'lib0/error'
 import * as math from 'lib0/math'
@@ -1728,6 +1729,31 @@ export const typeListDelete = (transaction, parent, index, length) => {
 }
 
 /**
+ * Applies `doc.mapConflict` to a local write and remembers the written key.
+ *
+ * @param {Transaction} transaction
+ * @param {YType} parent
+ * @param {string} key
+ * @return {boolean} Whether the write should be applied.
+ *
+ * @private
+ * @function
+ */
+const claimMapKeyWrite = (transaction, parent, key) => {
+  const strategy = transaction.doc.mapConflict
+  if (strategy === 'overwrite') return true
+  const writtenKeys = map.setIfUndefined(transaction._mapKeysWritten, parent, () => /** @type {Set<string>} */ (set.create()))
+  if (!writtenKeys.has(key)) {
+    writtenKeys.add(key)
+    return true
+  }
+  if (strategy === 'error') {
+    throw error.create(`Map key "${key}" was written more than once in the same transaction`)
+  }
+  return false
+}
+
+/**
  * @todo inline this code
  *
  * @param {Transaction} transaction
@@ -1739,7 +1765,7 @@ export const typeListDelete = (transaction, parent, index, length) => {
  */
 export const typeMapDelete = (transaction, parent, key) => {
   const c = parent._map.get(key)
-  if (c !== undefined) {
+  if (c !== undefined && !c.deleted && claimMapKeyWrite(transaction, parent, key)) {
     c.delete(transaction)
   }
 }
@@ -1785,6 +1811,7 @@ export const typeMapSet = (transaction, parent, key, value) => {
         }
     }
   }
+  if (!claimMapKeyWrite(transaction, parent, key)) return
   new Item(createID(ownClientId, getState(doc.store, ownClientId)), left, left && left.lastId, null, null, parent, key, content).integrate(transaction, 0)
 }
 

@@ -130,6 +130,12 @@ export class Transaction {
      */
     this._needFormattingCleanup = false
     this._done = false
+    /**
+     * The map keys written locally in this transaction. Only populated when `doc.mapConflict` is
+     * not `overwrite`.
+     * @type {Map<YType,Set<string>>}
+     */
+    this._mapKeysWritten = new Map()
   }
 
   /**

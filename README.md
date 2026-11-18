@@ -865,6 +865,17 @@ const doc = new Y.Doc()
 ```
 
 <dl>
+  <b><code>new Y.Doc({ mapConflict: 'overwrite' | 'keep-first' | 'error' })</code></b>
+  <dd>
+Controls what happens when a transaction writes to the same map key more than
+once. Setting and deleting a key both count as writes. With
+<code>overwrite</code> (the default), the last write wins. With
+<code>keep-first</code>, the first write wins and later writes to that key are
+ignored. With <code>error</code>, later writes to that key throw an error. Writes
+that ran before the error stay applied, because transactions don't roll back.
+The strategy only applies to local writes on this doc. Remote updates are always
+merged as usual, so peers with different strategies still converge.
+  </dd>
   <b><code>clientID</code></b>
   <dd>A unique id that identifies this client. (readonly)</dd>
   <b><code>gc</code></b>
