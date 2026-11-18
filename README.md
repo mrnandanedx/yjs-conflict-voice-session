@@ -873,14 +873,28 @@ once. Setting and deleting a key both count as writes. With
 <code>keep-first</code>, the first write wins and later writes to that key are
 ignored. With <code>error</code>, later writes to that key throw a
 <code>Y.MapConflictError</code>. Writes that ran before the error stay applied,
-because transactions don't roll back. The strategy only applies to local writes
-on this doc. Remote updates are always merged as usual, so peers with different
-strategies still converge.
+because transactions don't roll back. This strategy only applies to local writes
+on this doc.
+  </dd>
+  <b><code>new Y.Doc({ remoteMapConflict: string })</code></b>
+  <dd>
+Controls what happens when an incoming update shows that two clients wrote the
+same map key without seeing each other's write. With <code>ignore</code> (the
+default), the update is merged as usual. With <code>record</code>, it is merged
+and the conflict is logged. With <code>refuse</code>, nothing from the update is
+applied, the conflict is logged, and <code>applyUpdate</code> throws a
+<code>Y.MapConflictError</code>. With <code>discard</code>, nothing from the
+update is applied and the conflict is logged, without an error. <br>
+<b>Warning:</b> <code>refuse</code> and <code>discard</code> give up convergence.
+This doc stops matching peers that accepted the update, and later updates that
+build on the rejected one stay pending. Concurrent deletes are not detected,
+because a delete doesn't record which write it saw.
   </dd>
   <b><code>mapConflicts:Array&lt;MapConflict&gt;</code></b>
   <dd>
-The writes refused by <code>keep-first</code> or <code>error</code>, oldest first.
-Each record has <code>key</code>, <code>type</code>, <code>operation</code>
+The writes that lost a conflict, oldest first. Each record has
+<code>source</code> (<code>local</code> or <code>remote</code>),
+<code>key</code>, <code>type</code>, <code>operation</code>
 (<code>set</code> or <code>delete</code>), <code>value</code>,
 <code>currentValue</code>, <code>strategy</code>, <code>origin</code>,
 <code>clientID</code>, and <code>time</code>. The same record is available as
@@ -893,8 +907,9 @@ you clear it with <code>doc.mapConflicts.length = 0</code>.
 Summarizes <code>mapConflicts</code> with one entry per map and key. Each entry
 has <code>type</code>, <code>mapName</code> (<code>null</code> for nested types),
 <code>key</code>, <code>refusedCount</code>, and <code>writes</code>. Each item in
-<code>writes</code> says who wrote what: <code>status</code> (<code>kept</code> or
-<code>refused</code>), <code>clientID</code>, <code>origin</code>,
+<code>writes</code> says who wrote what: <code>status</code> (<code>kept</code>,
+<code>refused</code>, or <code>lost</code> for a merged write that another client
+won), <code>clientID</code>, <code>origin</code>,
 <code>operation</code>, <code>value</code>, and <code>time</code>.
   </dd>
   <b><code>clientID</code></b>

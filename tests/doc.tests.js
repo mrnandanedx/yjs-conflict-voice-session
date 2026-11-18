@@ -591,3 +591,212 @@ export const testMapConflictSummary = _tc => {
   ydoc.mapConflicts.length = 0
   t.compare(ydoc.getMapConflictSummary(), [])
 }
+
+/**
+ * Creates two clients that wrote different values to the same key without seeing each other.
+ */
+const createConcurrentWrites = () => {
+  const alice = new Y.Doc()
+  alice.clientID = 1
+  const bob = new Y.Doc()
+  bob.clientID = 2
+  alice.get().setAttr('a', 'alice')
+  bob.transact(() => {
+    bob.get().setAttr('a', 'bob')
+    bob.get().setAttr('other', 'bob')
+  })
+  return { alice, bob, aliceUpdate: Y.encodeStateAsUpdate(alice), bobUpdate: Y.encodeStateAsUpdate(bob) }
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testRemoteMapConflictIgnoredByDefault = _tc => {
+  const { aliceUpdate, bobUpdate } = createConcurrentWrites()
+  const ydoc = new Y.Doc()
+  t.assert(ydoc.remoteMapConflict === 'ignore')
+  Y.applyUpdate(ydoc, aliceUpdate)
+  Y.applyUpdate(ydoc, bobUpdate)
+  t.assert(ydoc.mapConflicts.length === 0)
+  t.assert(ydoc.get().getAttr('other') === 'bob')
+  t.fails(() => {
+    new Y.Doc({ remoteMapConflict: /** @type {any} */ ('unknown') }) // eslint-disable-line no-new
+  })
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testRemoteMapConflictRecord = _tc => {
+  const { aliceUpdate, bobUpdate } = createConcurrentWrites()
+  const ydoc = new Y.Doc({ remoteMapConflict: 'record' })
+  const reference = new Y.Doc()
+  Y.applyUpdate(ydoc, aliceUpdate)
+  Y.applyUpdate(ydoc, bobUpdate, 'from-bob')
+  Y.applyUpdate(reference, aliceUpdate)
+  Y.applyUpdate(reference, bobUpdate)
+  // the update is merged as usual
+  const winner = reference.get().getAttr('a')
+  t.assert(ydoc.get().getAttr('a') === winner)
+  t.assert(ydoc.get().getAttr('other') === 'bob')
+  t.assert(ydoc.mapConflicts.length === 1)
+  const conflict = ydoc.mapConflicts[0]
+  t.assert(conflict.source === 'remote')
+  t.assert(conflict.strategy === 'record')
+  t.assert(conflict.key === 'a')
+  t.assert(conflict.type === ydoc.get())
+  t.assert(conflict.currentValue === 'alice')
+  t.assert(conflict.accepted?.value === winner)
+  t.assert(conflict.value !== winner)
+  const [group] = ydoc.getMapConflictSummary()
+  t.assert(group.mapName === '' && group.key === 'a' && group.refusedCount === 1)
+  t.compare(group.writes.map(w => [w.status, w.value]).sort(), [['kept', winner], ['lost', conflict.value]].sort())
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testRemoteMapConflictRefuse = _tc => {
+  const { aliceUpdate, bobUpdate } = createConcurrentWrites()
+  const ydoc = new Y.Doc({ remoteMapConflict: 'refuse' })
+  Y.applyUpdate(ydoc, aliceUpdate)
+  const stateBefore = Y.encodeStateVector(ydoc)
+  let updates = 0
+  ydoc.on('update', () => { updates++ })
+  /**
+   * @type {any}
+   */
+  let caught = null
+  try {
+    Y.applyUpdate(ydoc, bobUpdate, 'from-bob')
+  } catch (err) {
+    caught = err
+  }
+  t.assert(caught instanceof Y.MapConflictError)
+  t.assert(caught.conflict.source === 'remote')
+  t.assert(caught.conflict.clientID === 2)
+  t.assert(caught.conflict.value === 'bob')
+  t.assert(caught.conflict.origin === 'from-bob')
+  t.assert(caught.conflict.accepted.value === 'alice')
+  t.assert(caught.conflict.accepted.clientID === 1)
+  t.assert(caught.conflicts.length === 1)
+  // nothing from the update is applied
+  t.assert(ydoc.get().getAttr('a') === 'alice')
+  t.assert(ydoc.get().getAttr('other') === undefined)
+  t.compare(Y.encodeStateVector(ydoc), stateBefore)
+  t.assert(updates === 0)
+  // delivering the same update again doesn't log it twice
+  t.fails(() => {
+    Y.applyUpdate(ydoc, bobUpdate)
+  })
+  t.assert(ydoc.mapConflicts.length === 1)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testRemoteMapConflictDiscard = _tc => {
+  const { aliceUpdate, bobUpdate } = createConcurrentWrites()
+  const ydoc = new Y.Doc({ remoteMapConflict: 'discard' })
+  Y.applyUpdate(ydoc, aliceUpdate)
+  Y.applyUpdate(ydoc, bobUpdate)
+  t.assert(ydoc.get().getAttr('a') === 'alice')
+  t.assert(ydoc.get().getAttr('other') === undefined)
+  t.assert(ydoc.mapConflicts.length === 1)
+  t.assert(ydoc.mapConflicts[0].strategy === 'discard')
+  t.assert(ydoc.getMapConflictSummary()[0].writes[1].status === 'refused')
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testRemoteMapConflictIgnoresSequentialWrites = _tc => {
+  const alice = new Y.Doc()
+  alice.clientID = 1
+  const bob = new Y.Doc()
+  bob.clientID = 2
+  const ydoc = new Y.Doc({ remoteMapConflict: 'refuse' })
+  alice.get().setAttr('a', 1)
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(alice))
+  Y.applyUpdate(bob, Y.encodeStateAsUpdate(alice))
+  // bob saw alice's write
+  bob.get().setAttr('a', 2)
+  bob.get().setAttr('a', 3)
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(bob))
+  t.assert(ydoc.get().getAttr('a') === 3)
+  t.assert(ydoc.mapConflicts.length === 0)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testRemoteMapConflictAllowsLoadingResolvedHistory = _tc => {
+  const { alice, bob, aliceUpdate, bobUpdate } = createConcurrentWrites()
+  Y.applyUpdate(alice, bobUpdate)
+  Y.applyUpdate(bob, aliceUpdate)
+  // the sender already resolved this conflict, so a new peer can load the document
+  const ydoc = new Y.Doc({ remoteMapConflict: 'refuse' })
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(alice))
+  t.assert(ydoc.get().getAttr('a') === alice.get().getAttr('a'))
+  t.assert(ydoc.mapConflicts.length === 0)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testRemoteMapConflictInMergedUpdate = _tc => {
+  const { aliceUpdate, bobUpdate } = createConcurrentWrites()
+  const ydoc = new Y.Doc({ remoteMapConflict: 'discard' })
+  Y.applyUpdate(ydoc, Y.mergeUpdates([aliceUpdate, bobUpdate]))
+  // neither write is applied, so both are logged and no write was kept
+  t.compare(ydoc.mapConflicts.map(conflict => conflict.value).sort(), ['alice', 'bob'])
+  t.assert(ydoc.mapConflicts.every(conflict => conflict.accepted === null))
+  t.assert(ydoc.get().getAttr('a') === undefined)
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testRemoteMapConflictOnNestedMap = _tc => {
+  const alice = new Y.Doc()
+  alice.clientID = 1
+  const bob = new Y.Doc()
+  bob.clientID = 2
+  alice.get().setAttr('nested', new Y.Type())
+  Y.applyUpdate(bob, Y.encodeStateAsUpdate(alice))
+  const ydoc = new Y.Doc({ remoteMapConflict: 'discard' })
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(alice))
+  alice.get().getAttr('nested').setAttr('a', 'alice')
+  bob.get().getAttr('nested').setAttr('a', 'bob')
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(alice))
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(bob))
+  t.assert(ydoc.get().getAttr('nested').getAttr('a') === 'alice')
+  t.assert(ydoc.mapConflicts.length === 1)
+  t.assert(ydoc.mapConflicts[0].type === ydoc.get().getAttr('nested'))
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testRemoteMapConflictKeepsDependentUpdatesPending = _tc => {
+  const alice = new Y.Doc()
+  alice.clientID = 1
+  const bob = new Y.Doc()
+  bob.clientID = 2
+  /**
+   * @type {Array<Uint8Array>}
+   */
+  const bobUpdates = []
+  bob.on('update', update => { bobUpdates.push(update) })
+  alice.get().setAttr('a', 'alice')
+  bob.get().setAttr('a', 'bob-1')
+  bob.get().setAttr('a', 'bob-2')
+  const ydoc = new Y.Doc({ remoteMapConflict: 'discard' })
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(alice))
+  Y.applyUpdate(ydoc, bobUpdates[1]) // depends on the first update, so it can't be checked yet
+  t.assert(ydoc.mapConflicts.length === 0)
+  Y.applyUpdate(ydoc, bobUpdates[0])
+  t.assert(ydoc.mapConflicts.length === 1)
+  t.assert(ydoc.get().getAttr('a') === 'alice')
+  t.assert(ydoc.store.pendingStructs !== null)
+}

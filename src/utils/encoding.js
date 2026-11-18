@@ -19,6 +19,10 @@ import {
   getState,
   getStateVector,
   readAndApplyDeleteSet,
+  readIdSet,
+  findRemoteMapConflicts,
+  rejectRemoteMapConflicts,
+  logMergedMapConflicts,
   writeIdSet,
   transact,
   UpdateDecoderV1,
@@ -366,11 +370,18 @@ export const readUpdateV2 = (decoder, ydoc, transactionOrigin, structDecoder = n
     })
     // remove known items from ss
     ss.exclude(knownState)
+    const mapConflicts = doc.remoteMapConflict === 'ignore' ? [] : findRemoteMapConflicts(transaction, ss)
+    if (mapConflicts.length > 0 && doc.remoteMapConflict !== 'record') {
+      rejectRemoteMapConflicts(doc, mapConflicts)
+      readIdSet(structDecoder) // the update is dropped, but the decoder may be read further
+      return
+    }
     // console.log('time to read structs: ', performance.now() - start) // @todo remove
     // start = performance.now()
     // console.log('time to merge: ', performance.now() - start) // @todo remove
     // start = performance.now()
     const restStructs = integrateStructs(transaction, store, ss)
+    logMergedMapConflicts(doc, mapConflicts)
     const pending = store.pendingStructs
     if (pending) {
       // check if we can apply something

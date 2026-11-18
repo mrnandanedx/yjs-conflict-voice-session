@@ -33,6 +33,19 @@ export const generateNewClientId = random.uint32
  * displayed as suggestions, which might not be intended.
  * @property {MapConflictStrategy} [DocOpts.mapConflict='overwrite'] How to handle a local write to
  * a map key that was already written in the same transaction.
+ * @property {RemoteMapConflictStrategy} [DocOpts.remoteMapConflict='ignore'] How to handle an
+ * incoming update in which two clients wrote the same map key without seeing each other's write.
+ */
+
+/**
+ * - `ignore`: merge the update and log nothing.
+ * - `record`: merge the update and log the conflict on `doc.mapConflicts`.
+ * - `refuse`: apply nothing from the update, log the conflict, and throw a `MapConflictError`.
+ * - `discard`: apply nothing from the update and log the conflict, without throwing.
+ *
+ * `refuse` and `discard` give up convergence: this doc stops matching peers that accepted the update.
+ *
+ * @typedef {'ignore'|'record'|'refuse'|'discard'} RemoteMapConflictStrategy
  */
 
 /**
@@ -58,45 +71,60 @@ export const generateNewClientId = random.uint32
  * All refused writes to one key of one map, next to the writes that were kept instead.
  *
  * @typedef {Object} MapConflictSummary
- * @property {YType<any>} MapConflictSummary.type The type that owns the key.
+ * @property {YType<any>|null} MapConflictSummary.type The type that owns the key. `null` if this
+ * doc doesn't know the type.
  * @property {string|null} MapConflictSummary.mapName The name of the type if it is a top-level
  * type. `null` if the type is nested.
  * @property {string} MapConflictSummary.key The map key.
  * @property {number} MapConflictSummary.refusedCount The number of refused writes.
- * @property {Array<MapWrite & { status: 'kept'|'refused' }>} MapConflictSummary.writes Every kept
- * and refused write, oldest first.
+ * @property {Array<MapWrite & { status: 'kept'|'refused'|'lost' }>} MapConflictSummary.writes Every
+ * kept, refused, and lost write, oldest first. A `lost` write was merged, but another client's
+ * write to the key won.
  */
 
 /**
- * Describes a local map write that was refused by `doc.mapConflict`.
+ * Describes a map write that lost a conflict. `source` is `local` for a repeated write in one
+ * transaction, and `remote` for concurrent writes by two clients found in an incoming update.
  *
  * @typedef {Object} MapConflict
+ * @property {'local'|'remote'} MapConflict.source Where the conflict was detected.
  * @property {string} MapConflict.key The map key that was written more than once.
- * @property {YType<any>} MapConflict.type The type that owns the key.
- * @property {'set'|'delete'} MapConflict.operation The refused operation.
- * @property {any} MapConflict.value The refused value. `undefined` if a delete was refused.
- * @property {any} MapConflict.currentValue The value of the key when the write was refused.
- * @property {'keep-first'|'error'} MapConflict.strategy The strategy that refused the write.
+ * @property {YType<any>|null} MapConflict.type The type that owns the key. `null` if this doc
+ * doesn't know the type because the update that creates it was not applied.
+ * @property {'set'|'delete'} MapConflict.operation The losing operation.
+ * @property {any} MapConflict.value The losing value. `undefined` for a delete.
+ * @property {any} MapConflict.currentValue The value of the key when the conflict was detected.
+ * @property {'keep-first'|'error'|'record'|'refuse'|'discard'} MapConflict.strategy The strategy
+ * that handled the conflict.
  * @property {any} MapConflict.origin The origin of the transaction.
- * @property {number} MapConflict.clientID The client that attempted the write.
- * @property {number} MapConflict.time Unix time in milliseconds when the write was refused.
- * @property {MapWrite} MapConflict.accepted The earlier write in this transaction that was kept.
+ * @property {number} MapConflict.clientID The client that wrote the losing value.
+ * @property {number} MapConflict.time Unix time in milliseconds when the conflict was detected.
+ * @property {MapWrite|null} MapConflict.accepted The write that was kept. `null` if the key has no
+ * value on this doc because the whole update was refused.
  */
 
 /**
- * Thrown when `doc.mapConflict` is `error` and a transaction writes to a map key more than once.
+ * Thrown when `doc.mapConflict` is `error` and a transaction writes to a map key more than once,
+ * or when `doc.remoteMapConflict` is `refuse` and an incoming update has conflicting writes.
  */
 export class MapConflictError extends Error {
   /**
    * @param {MapConflict} conflict
+   * @param {Array<MapConflict>} [conflicts] All conflicts that caused this error.
    */
-  constructor (conflict) {
-    super(`Refused ${conflict.operation} on map key "${conflict.key}": the key was already written in this transaction`)
+  constructor (conflict, conflicts = [conflict]) {
+    super(conflict.source === 'remote'
+      ? `Refused update: client ${conflict.clientID} wrote map key "${conflict.key}" concurrently with another client`
+      : `Refused ${conflict.operation} on map key "${conflict.key}": the key was already written in this transaction`)
     this.name = 'MapConflictError'
     /**
      * @type {MapConflict}
      */
     this.conflict = conflict
+    /**
+     * @type {Array<MapConflict>}
+     */
+    this.conflicts = conflicts
   }
 }
 
@@ -124,18 +152,31 @@ export class Doc extends ObservableV2 {
   /**
    * @param {DocOpts} opts configuration
    */
-  constructor ({ guid = random.uuidv4(), collectionid = null, gc = true, gcFilter = () => true, meta = null, autoLoad = false, shouldLoad = true, isSuggestionDoc = false, mapConflict = 'overwrite' } = {}) {
+  constructor ({ guid = random.uuidv4(), collectionid = null, gc = true, gcFilter = () => true, meta = null, autoLoad = false, shouldLoad = true, isSuggestionDoc = false, mapConflict = 'overwrite', remoteMapConflict = 'ignore' } = {}) {
     super()
     if (mapConflict !== 'overwrite' && mapConflict !== 'keep-first' && mapConflict !== 'error') {
       throw new Error(`Unknown mapConflict strategy: ${mapConflict}`)
     }
+    if (remoteMapConflict !== 'ignore' && remoteMapConflict !== 'record' && remoteMapConflict !== 'refuse' && remoteMapConflict !== 'discard') {
+      throw new Error(`Unknown remoteMapConflict strategy: ${remoteMapConflict}`)
+    }
+    /**
+     * @type {RemoteMapConflictStrategy}
+     */
+    this.remoteMapConflict = remoteMapConflict
+    /**
+     * Remote conflicts that were already logged, by the id of the losing write.
+     *
+     * @type {Map<string,MapConflict>}
+     */
+    this._loggedRemoteMapConflicts = new Map()
     /**
      * @type {MapConflictStrategy}
      */
     this.mapConflict = mapConflict
     /**
-     * Every local map write refused by `mapConflict`, oldest first. This log is kept in memory on
-     * this doc instance. It is not synced or persisted.
+     * Every map write that lost a conflict, oldest first. This log is kept in memory on this doc
+     * instance. It is not synced or persisted.
      *
      * @type {Array<MapConflict>}
      */
@@ -301,14 +342,14 @@ export class Doc extends ObservableV2 {
      */
     const summary = []
     /**
-     * @type {Map<YType<any>, Map<string, MapConflictSummary>>}
+     * @type {Map<YType<any>|null, Map<string, MapConflictSummary>>}
      */
     const groups = new Map()
     /**
      * @type {Set<MapWrite>}
      */
     const listedAccepted = new Set()
-    this.mapConflicts.forEach(({ type, key, operation, value, clientID, origin, time, accepted }) => {
+    this.mapConflicts.forEach(({ type, key, operation, value, clientID, origin, time, accepted, strategy }) => {
       const group = map.setIfUndefined(map.setIfUndefined(groups, type, () => /** @type {Map<string, MapConflictSummary>} */ (new Map())), key, () => {
         const rootEntry = array.from(this.share.entries()).find(([, rootType]) => rootType === type)
         /**
@@ -318,12 +359,12 @@ export class Doc extends ObservableV2 {
         summary.push(created)
         return created
       })
-      if (!listedAccepted.has(accepted)) {
+      if (accepted !== null && !listedAccepted.has(accepted)) {
         listedAccepted.add(accepted)
         group.writes.push({ status: 'kept', ...accepted })
       }
       group.refusedCount++
-      group.writes.push({ status: 'refused', operation, value, clientID, origin, time })
+      group.writes.push({ status: strategy === 'record' ? 'lost' : 'refused', operation, value, clientID, origin, time })
     })
     return summary
   }

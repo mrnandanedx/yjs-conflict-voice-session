@@ -1754,7 +1754,7 @@ const claimMapKeyWrite = (transaction, parent, key, operation, value) => {
     firstWrites.set(key, write)
     return true
   }
-  const conflict = { ...write, key, type: parent, currentValue: typeMapGet(parent, key), strategy, accepted }
+  const conflict = { ...write, source: /** @type {'local'} */ ('local'), key, type: parent, currentValue: typeMapGet(parent, key), strategy, accepted }
   doc.mapConflicts.push(conflict)
   if (strategy === 'error') {
     throw new MapConflictError(conflict)
