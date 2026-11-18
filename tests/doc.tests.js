@@ -800,3 +800,72 @@ export const testRemoteMapConflictKeepsDependentUpdatesPending = _tc => {
   t.assert(ydoc.get().getAttr('a') === 'alice')
   t.assert(ydoc.store.pendingStructs !== null)
 }
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testLocalMapConflictAmbiguity = _tc => {
+  const ydoc = new Y.Doc({ mapConflict: 'keep-first' })
+  const ymap = ydoc.get()
+  ydoc.transact(() => {
+    ymap.setAttr('plain', 1)
+    ymap.setAttr('plain', 2)
+    ymap.setAttr('losingType', 1)
+    ymap.setAttr('losingType', new Y.Type())
+    ymap.setAttr('keptType', new Y.Type())
+    ymap.setAttr('keptType', 1)
+    ymap.setAttr('losingSubdoc', 1)
+    ymap.setAttr('losingSubdoc', new Y.Doc())
+    ymap.setAttr('keptSubdoc', new Y.Doc())
+    ymap.deleteAttr('keptSubdoc')
+  })
+  t.compare(ydoc.mapConflicts.map(conflict => [conflict.key, conflict.ambiguous]), [
+    ['plain', false],
+    ['losingType', true],
+    ['keptType', true],
+    ['losingSubdoc', true],
+    ['keptSubdoc', true]
+  ])
+  t.compare(ydoc.getMapConflictSummary().map(group => group.ambiguous), [false, true, true, true, true])
+}
+
+/**
+ * @param {any} aliceValue
+ * @param {any} bobValue
+ * @param {'record'|'refuse'|'discard'} strategy
+ */
+const createRemoteConflict = (aliceValue, bobValue, strategy) => {
+  const alice = new Y.Doc()
+  alice.clientID = 1
+  const bob = new Y.Doc()
+  bob.clientID = 2
+  alice.get().setAttr('a', aliceValue)
+  bob.get().setAttr('a', bobValue)
+  const ydoc = new Y.Doc({ remoteMapConflict: strategy })
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(alice))
+  try {
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(bob))
+  } catch (err) {
+    t.assert(err instanceof Y.MapConflictError)
+  }
+  t.assert(ydoc.mapConflicts.length === 1)
+  return ydoc.mapConflicts[0]
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testRemoteMapConflictAmbiguity = _tc => {
+  /**
+   * @type {Array<'record'|'refuse'|'discard'>}
+   */
+  const strategies = ['record', 'refuse', 'discard']
+  strategies.forEach(strategy => {
+    t.assert(!createRemoteConflict('alice', 'bob', strategy).ambiguous)
+    t.assert(createRemoteConflict('alice', new Y.Type(), strategy).ambiguous)
+    t.assert(createRemoteConflict(new Y.Type(), 'bob', strategy).ambiguous)
+    t.assert(createRemoteConflict('alice', new Y.Doc(), strategy).ambiguous)
+    t.assert(createRemoteConflict(new Y.Doc(), 'bob', strategy).ambiguous)
+    t.assert(createRemoteConflict(new Y.Type(), new Y.Doc(), strategy).ambiguous)
+  })
+}

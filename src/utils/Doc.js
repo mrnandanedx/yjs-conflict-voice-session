@@ -77,6 +77,7 @@ export const generateNewClientId = random.uint32
  * type. `null` if the type is nested.
  * @property {string} MapConflictSummary.key The map key.
  * @property {number} MapConflictSummary.refusedCount The number of refused writes.
+ * @property {boolean} MapConflictSummary.ambiguous Whether any conflict on this key is ambiguous.
  * @property {Array<MapWrite & { status: 'kept'|'refused'|'lost' }>} MapConflictSummary.writes Every
  * kept, refused, and lost write, oldest first. A `lost` write was merged, but another client's
  * write to the key won.
@@ -101,7 +102,18 @@ export const generateNewClientId = random.uint32
  * @property {number} MapConflict.time Unix time in milliseconds when the conflict was detected.
  * @property {MapWrite|null} MapConflict.accepted The write that was kept. `null` if the key has no
  * value on this doc because the whole update was refused.
+ * @property {boolean} MapConflict.ambiguous Whether the losing or the kept value is a shared type
+ * or a subdocument. These values hold their own content, so comparing the two writes doesn't tell
+ * what was lost.
  */
+
+/**
+ * @param {any} value The losing value.
+ * @param {MapWrite|null} accepted The write that was kept.
+ * @return {boolean}
+ */
+export const isAmbiguousMapConflict = (value, accepted) =>
+  [value, accepted?.value].some(v => v instanceof YType || v instanceof Doc)
 
 /**
  * Thrown when `doc.mapConflict` is `error` and a transaction writes to a map key more than once,
@@ -349,13 +361,13 @@ export class Doc extends ObservableV2 {
      * @type {Set<MapWrite>}
      */
     const listedAccepted = new Set()
-    this.mapConflicts.forEach(({ type, key, operation, value, clientID, origin, time, accepted, strategy }) => {
+    this.mapConflicts.forEach(({ type, key, operation, value, clientID, origin, time, accepted, strategy, ambiguous }) => {
       const group = map.setIfUndefined(map.setIfUndefined(groups, type, () => /** @type {Map<string, MapConflictSummary>} */ (new Map())), key, () => {
         const rootEntry = array.from(this.share.entries()).find(([, rootType]) => rootType === type)
         /**
          * @type {MapConflictSummary}
          */
-        const created = { type, mapName: rootEntry ? rootEntry[0] : null, key, refusedCount: 0, writes: [] }
+        const created = { type, mapName: rootEntry ? rootEntry[0] : null, key, refusedCount: 0, ambiguous: false, writes: [] }
         summary.push(created)
         return created
       })
@@ -364,6 +376,7 @@ export class Doc extends ObservableV2 {
         group.writes.push({ status: 'kept', ...accepted })
       }
       group.refusedCount++
+      group.ambiguous = group.ambiguous || ambiguous
       group.writes.push({ status: strategy === 'record' ? 'lost' : 'refused', operation, value, clientID, origin, time })
     })
     return summary

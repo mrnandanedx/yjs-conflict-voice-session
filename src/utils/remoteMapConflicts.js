@@ -3,6 +3,7 @@ import {
   ContentType,
   Item,
   MapConflictError,
+  isAmbiguousMapConflict,
   YType,
   getItem,
   getState,
@@ -236,7 +237,8 @@ const logRemoteConflict = (doc, conflict, loser, accepted) => {
     type: parent instanceof YType ? parent : (parent.startsWith('root:') ? doc.get(parent.slice(5)) : null),
     currentValue: conflict.currentValue,
     strategy: /** @type {'record'|'refuse'|'discard'} */ (doc.remoteMapConflict),
-    accepted
+    accepted,
+    ambiguous: isAmbiguousMapConflict(loser.write.value, accepted)
   }
   doc._loggedRemoteMapConflicts.set(id, record)
   doc.mapConflicts.push(record)

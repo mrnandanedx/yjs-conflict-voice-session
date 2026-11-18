@@ -897,7 +897,10 @@ The writes that lost a conflict, oldest first. Each record has
 <code>key</code>, <code>type</code>, <code>operation</code>
 (<code>set</code> or <code>delete</code>), <code>value</code>,
 <code>currentValue</code>, <code>strategy</code>, <code>origin</code>,
-<code>clientID</code>, and <code>time</code>. The same record is available as
+<code>clientID</code>, <code>time</code>, and <code>ambiguous</code>.
+<code>ambiguous</code> is <code>true</code> if the losing or the kept value is a
+shared type or a subdocument. These values hold their own content, so comparing
+the two writes doesn't tell you what was lost. The same record is available as
 <code>error.conflict</code> on a <code>Y.MapConflictError</code>. The log is kept
 in memory on this doc instance. It isn't synced or persisted, and it grows until
 you clear it with <code>doc.mapConflicts.length = 0</code>.
@@ -906,7 +909,8 @@ you clear it with <code>doc.mapConflicts.length = 0</code>.
   <dd>
 Summarizes <code>mapConflicts</code> with one entry per map and key. Each entry
 has <code>type</code>, <code>mapName</code> (<code>null</code> for nested types),
-<code>key</code>, <code>refusedCount</code>, and <code>writes</code>. Each item in
+<code>key</code>, <code>refusedCount</code>, <code>ambiguous</code> (<code>true</code>
+if any conflict on the key is ambiguous), and <code>writes</code>. Each item in
 <code>writes</code> says who wrote what: <code>status</code> (<code>kept</code>,
 <code>refused</code>, or <code>lost</code> for a merged write that another client
 won), <code>clientID</code>, <code>origin</code>,
